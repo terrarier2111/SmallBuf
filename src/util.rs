@@ -30,3 +30,10 @@ pub(crate) fn find_sufficient_cap<const GROWTH_FACTOR: usize>(curr: usize, req: 
         curr *= GROWTH_FACTOR;
     }
 }
+
+#[inline]
+pub(crate) fn align_to<const ALIGNMENT: usize>(val: usize) -> usize {
+    let additional = val % ALIGNMENT;
+    let diff = ALIGNMENT - additional;
+    val + diff
+}

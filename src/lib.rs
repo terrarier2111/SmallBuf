@@ -201,6 +201,7 @@ mod tests {
     use std::mem::size_of;
     use crate::buffer_mut::BufferMut;
     use crate::{GenericBuffer, WritableBuffer};
+    use crate::buffer::Buffer;
 
     #[test]
     fn test_buffer_mut() {
@@ -211,6 +212,14 @@ mod tests {
         buffer.put_u64_le(7);
         buffer.put_u16_le(1);
         assert_eq!(buffer.len(), 18);
+        let buffer_2 = buffer.clone();
+        buffer.clear();
+        assert_eq!(buffer.len(), 0);
+        let converted = Buffer::from(buffer_2.clone());
+        assert_eq!(converted.len(), buffer_2.len());
+        assert!(converted.len() > 0);
+        assert_eq!(converted.capacity(), buffer_2.capacity());
+        assert!(converted.capacity() > 0);
     }
 
 }

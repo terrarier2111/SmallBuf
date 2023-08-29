@@ -2,12 +2,12 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{align_of, size_of};
 use std::ops::Add;
 use std::process::abort;
-use std::ptr;
+use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, GenericBuffer, ReadableBuffer};
 use crate::buffer_mut::BufferMut;
-use crate::util::alloc_uninit_buffer;
+use crate::util::{align_to, alloc_uninit_buffer};
 
 #[repr(C)]
 pub struct Buffer {
@@ -105,7 +105,7 @@ const MAX_REF_CNT: usize = usize::MAX / 2;
 impl From<BufferMut> for Buffer {
     fn from(value: BufferMut) -> Self {
         assert_eq!(INLINE_SIZE, buffer_mut::INLINE_SIZE);
-        if value.len <= INLINE_SIZE {
+        if value.len() <= INLINE_SIZE {
             return Self {
                 len: value.len,
                 rdx: 0,
@@ -113,23 +113,27 @@ impl From<BufferMut> for Buffer {
                 ptr: value.ptr,
             };
         }
-        if value.cap >= value.len + size_of::<AtomicUsize>() {
-            unsafe { *value.ptr.add(value.len).cast::<usize>() = 1; }
-            return Self {
+        let aligned_len = align_to::<{ align_of::<AtomicUsize>() }>(value.len);
+        assert_eq!(aligned_len % align_of::<AtomicUsize>(), 0);
+        if value.cap >= aligned_len + size_of::<AtomicUsize>() {
+            unsafe { *value.ptr.add(aligned_len).cast::<usize>() = 1; }
+            let ret = Self {
                 len: value.len,
                 rdx: 0,
                 cap: value.cap,
                 ptr: value.ptr,
             };
+            mem::forget(value);
+            return ret;
         }
         // FIXME: make this cold!
-        let alloc = unsafe { alloc_uninit_buffer(value.len + size_of::<AtomicUsize>()) };
+        let alloc = unsafe { alloc_uninit_buffer(aligned_len + size_of::<AtomicUsize>()) };
         unsafe { ptr::copy_nonoverlapping(value.ptr, alloc, value.len); }
-        unsafe { *value.ptr.add(value.len).cast::<usize>() = 1; }
+        unsafe { *value.ptr.add(aligned_len).cast::<usize>() = 1; }
         Self {
             len: value.len,
             rdx: 0,
-            cap: value.len + size_of::<AtomicUsize>(),
+            cap: aligned_len + size_of::<AtomicUsize>(),
             ptr: alloc,
         }
     }
@@ -174,7 +178,8 @@ impl Clone for Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         if self.len & INLINE_BUFFER_FLAG == 0 {
-            let ref_cnt = unsafe { &*self.ptr.add(self.len).cast::<AtomicUsize>() };
+            let aligned_len = align_to::<{ align_of::<AtomicUsize>() }>(self.len);
+            let ref_cnt = unsafe { &*self.ptr.add(aligned_len).cast::<AtomicUsize>() };
             let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // FIXME: can we choose a weaker ordering?
             if remaining == 0 {
                 unsafe { dealloc(self.ptr.cast::<u8>(), Layout::from_size_align_unchecked(self.cap, align_of::<AtomicUsize>())); }

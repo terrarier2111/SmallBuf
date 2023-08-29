@@ -5,7 +5,7 @@ use std::ptr;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::AtomicUsize;
 use crate::{GenericBuffer, WritableBuffer};
-use crate::util::{alloc_uninit_buffer, alloc_zeroed_buffer, find_sufficient_cap};
+use crate::util::{align_to, alloc_uninit_buffer, alloc_zeroed_buffer, find_sufficient_cap};
 
 #[repr(C)]
 pub struct BufferMut {
@@ -147,10 +147,11 @@ impl WritableBuffer for BufferMut {
             }
         } else {
             // we allocate an additional size_of(usize) bytes for the reference counter to be stored
-            let alloc = unsafe { alloc_uninit_buffer(cap + ADDITIONAL_BUFFER_CAP) };
+            let cap = align_to::<{ align_of::<AtomicUsize>() }>(cap) + ADDITIONAL_BUFFER_CAP;
+            let alloc = unsafe { alloc_uninit_buffer(cap) };
             Self {
                 len: 0,
-                cap: cap + ADDITIONAL_BUFFER_CAP,
+                cap,
                 ptr: alloc,
             }
         }
@@ -166,10 +167,11 @@ impl WritableBuffer for BufferMut {
             }
         } else {
             // we allocate an additional size_of(usize) bytes for the reference counter to be stored
-            let alloc = alloc_zeroed_buffer(len + ADDITIONAL_BUFFER_CAP);
+            let cap = align_to::<{ align_of::<AtomicUsize>() }>(len) + ADDITIONAL_BUFFER_CAP;
+            let alloc = alloc_zeroed_buffer(cap);
             Self {
                 len,
-                cap: len + ADDITIONAL_BUFFER_CAP,
+                cap,
                 ptr: alloc,
             }
         }
