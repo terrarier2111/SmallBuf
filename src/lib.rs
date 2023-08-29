@@ -200,7 +200,7 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 mod tests {
     use std::mem::size_of;
     use crate::buffer_mut::BufferMut;
-    use crate::{GenericBuffer, WritableBuffer};
+    use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
     use crate::buffer::Buffer;
 
     #[test]
@@ -220,6 +220,13 @@ mod tests {
         assert!(converted.len() > 0);
         assert_eq!(converted.capacity(), buffer_2.capacity());
         assert!(converted.capacity() > 0);
+        let mut cloned = converted.clone();
+        assert_eq!(cloned.len(), converted.len());
+        assert_eq!(cloned.capacity(), converted.capacity());
+
+        assert_eq!(cloned.get_u64_le(), 8);
+        assert_eq!(cloned.get_u64_le(), 7);
+        assert_eq!(cloned.get_u16_le(), 1);
     }
 
 }

@@ -163,8 +163,9 @@ impl Clone for Buffer {
     #[inline]
     fn clone(&self) -> Self {
         if self.len & INLINE_BUFFER_FLAG == 0 {
+            let aligned_len = align_to::<{ align_of::<AtomicUsize>() }>(self.len);
             // increase the ref cnt if the buffer isn't inlined
-            increment_ref_cnt(unsafe { &*self.ptr.add(self.len).cast::<AtomicUsize>() });
+            increment_ref_cnt(unsafe { &*self.ptr.add(aligned_len).cast::<AtomicUsize>() });
         }
         Self {
             len: self.len,
