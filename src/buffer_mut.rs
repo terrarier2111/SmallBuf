@@ -96,21 +96,26 @@ impl BufferMut {
     #[inline]
     fn ensure_large_enough(&mut self, req: usize) -> *mut u8 {
         if self.len & INLINE_FLAG != 0 {
-            #[cold]
-            #[inline(never)]
-            fn outline_buffer(buffer: *mut BufferMut, req: usize) -> *mut u8 {
-                if unsafe { (&*buffer).len() } + req > INLINE_SIZE {
+            if unsafe { self.len() } + req > INLINE_SIZE {
+                #[cold]
+                #[inline(never)]
+                fn outline_buffer(buffer: *mut BufferMut, req: usize) -> *mut u8 {
                     // remove the inline flag
                     unsafe { (&mut *buffer).len &= !INLINE_FLAG; }
                     // we allocate an additional size_of(usize) bytes for the reference counter to be stored
-                    unsafe { (&mut *buffer).cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP); }
-                    let alloc = alloc_zeroed_buffer(unsafe { (&*buffer).cap });
+                    let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
+                    let alloc = alloc_zeroed_buffer(cap);
+                    let len = unsafe { (&*buffer).len };
+                    // copy the previous buffer into the newly allocated one
+                    unsafe { ptr::copy_nonoverlapping(unsafe { buffer.cast::<u8>().add(size_of::<usize>()) }, alloc, len); }
+                    unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
+                    unsafe { alloc.add(len) }
                 }
-                return unsafe { buffer.cast::<u8>().add(usize::BITS as usize / 8 + (&*buffer).len) };
+                // handle outlining buffer
+                return outline_buffer(self as *mut BufferMut, req);
             }
-            // handle outlining buffer
-            return outline_buffer(self as *mut BufferMut, req);
+            return unsafe { (self as *mut BufferMut).cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
         }
         // handle buffer reallocation
         if self.cap < self.len + req {

@@ -196,3 +196,21 @@ pub trait WritableBuffer: GenericBuffer {
 }
 
 pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
+
+mod tests {
+    use std::mem::size_of;
+    use crate::buffer_mut::BufferMut;
+    use crate::{GenericBuffer, WritableBuffer};
+
+    #[test]
+    fn test_buffer_mut() {
+        let mut buffer = BufferMut::new();
+        buffer.put_u64_le(8);
+        assert_eq!(buffer.capacity(), size_of::<usize>() * 2);
+        assert_eq!(buffer.len(), 8);
+        buffer.put_u64_le(7);
+        buffer.put_u16_le(1);
+        assert_eq!(buffer.len(), 18);
+    }
+
+}
