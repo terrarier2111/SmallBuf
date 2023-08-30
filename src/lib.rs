@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_buffer_mut() {
-        let mut buffer = BufferMutGeneric::new();
+        let mut buffer = BufferMut::new();
         buffer.put_u64_le(8);
         assert_eq!(buffer.capacity(), size_of::<usize>() * 2);
         assert_eq!(buffer.len(), 8);

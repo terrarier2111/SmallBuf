@@ -1,4 +1,4 @@
-use std::alloc;
+use std::{alloc, ptr};
 use std::alloc::{alloc, alloc_zeroed, Layout};
 use std::mem::align_of;
 use std::ops::Add;
@@ -67,4 +67,19 @@ pub(crate) unsafe fn align_unaligned_ptr_to<const ALIGNMENT: usize>(ptr: *mut u8
     } else {
         unsafe { ptr.add(ptr_diff + align_to::<ALIGNMENT>(len - ptr_diff)) }
     }
+}
+
+#[inline]
+pub(crate) unsafe fn realloc_buffer(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
+    let alloc = unsafe { alloc_uninit_buffer(new_cap) };
+    // copy the previous buffer into the newly allocated one
+    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+    alloc
+}
+
+#[inline]
+pub(crate) unsafe fn realloc_buffer_and_dealloc(buf: *mut u8, len: usize, old_cap: usize, new_cap: usize) -> *mut u8 {
+    let alloc = unsafe { realloc_buffer(buf, len, new_cap) };
+    unsafe { dealloc(buf, old_cap); }
+    alloc
 }
