@@ -1,11 +1,13 @@
 use std::borrow::Borrow;
 use std::mem::{align_of, size_of};
 use std::ops::{Add, Deref};
-use std::ptr;
+use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::AtomicUsize;
 use crate::{GenericBuffer, WritableBuffer};
 use crate::util::{align_unaligned_len_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap};
+
+pub type BufferMut = BufferMutGeneric;
 
 #[repr(C)]
 pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true, const FAST_CONVERSION: bool = true> {
@@ -16,7 +18,7 @@ pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: u
 
 /// the MSB will never be used as allocations are capped at isize::MAX
 const INLINE_FLAG: usize = 1 << (usize::BITS - 1);
-pub(crate) const INLINE_SIZE: usize = size_of::<BufferMutGeneric::<0, 0, false, false, false>>() - size_of::<usize>();
+pub(crate) const INLINE_SIZE: usize = size_of::<BufferMutGeneric<0, 0, false, false, false>>() - size_of::<usize>();
 const ADDITIONAL_BUFFER_CAP: usize = size_of::<AtomicUsize>();
 
 unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
@@ -79,15 +81,36 @@ Borrow<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
 Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
     fn into(self) -> Vec<u8> {
-        todo!()
+        unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
     }
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
 From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
-    fn from(value: Vec<u8>) -> Self {
-        todo!()
+    fn from(mut value: Vec<u8>) -> Self {
+        let ptr = value.as_mut_ptr();
+        let cap = value.capacity();
+        let len = value.len();
+        // handle small buffers
+        if INLINE_SMALL && len <= INLINE_SIZE {
+            let mut ret = Self {
+                len,
+                cap: 0,
+                ptr: null_mut(),
+            };
+            let ret_ptr = &mut ret as *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
+            unsafe { ptr::copy_nonoverlapping(ptr, ret_ptr.cast::<u8>().add(size_of::<usize>()), len); }
+            return ret;
+        }
+        mem::forget(value);
+        // reuse existing buffer
+        Self {
+            len,
+            cap,
+            ptr,
+        }
     }
 }
 
@@ -150,8 +173,8 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) -> *mut u8 {
                     // remove the inline flag
                     unsafe { (&mut *buffer).len &= !INLINE_FLAG; }
-                    // we allocate an additional size_of(usize) bytes for the reference counter to be stored
                     let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, if FAST_CONVERSION {
+                        // we allocate an additional size_of(usize) * 2 - 1 bytes for the reference counter to be stored
                         req + ADDITIONAL_BUFFER_CAP
                     } else {
                         req
@@ -216,7 +239,7 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, ST
     }
 
     fn zeroed(len: usize) -> Self {
-        if len <= INLINE_SIZE {
+        if INLINE_SMALL && len <= INLINE_SIZE {
             Self {
                 len: len | INLINE_FLAG,
                 // the following two values are now treated as the buffer

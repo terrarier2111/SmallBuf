@@ -1,14 +1,16 @@
 use std::borrow::Borrow;
 use std::mem::{align_of, size_of};
 use std::ops::{Add, Deref};
-use std::ptr;
+use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::AtomicUsize;
 use crate::util::{align_unaligned_len_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap};
 use crate::{GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
 
+pub type BufferRW = BufferRWGeneric;
+
 #[repr(C)]
-pub struct BufferRW<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true, const FAST_CONVERSION: bool = true> {
+pub struct BufferRWGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true, const FAST_CONVERSION: bool = true> {
     len: usize,
     rdx: usize,
     cap: usize,
@@ -17,28 +19,32 @@ pub struct BufferRW<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = {
 
 /// the MSB will never be used as allocations are capped at isize::MAX
 const INLINE_FLAG: usize = 1 << (usize::BITS - 1);
-const INLINE_SIZE: usize = size_of::<BufferRW::<0, 0, false, false, false>>() - size_of::<usize>();
+const INLINE_SIZE: usize = size_of::<BufferRWGeneric::<0, 0, false, false, false>>() - size_of::<usize>();
 const ADDITIONAL_BUFFER_CAP: usize = size_of::<AtomicUsize>();
 
 unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Send for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
+Send for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
 unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Sync for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
+Sync for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
 
     #[inline]
     fn ensure_large_enough(&mut self, req: usize) -> *mut u8 {
         if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
-            if unsafe { self.len() } + req > INLINE_SIZE {
+            if self.len() + req > INLINE_SIZE {
                 #[cold]
                 #[inline(never)]
-                fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) -> *mut u8 {
+                fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) -> *mut u8 {
                     // remove the inline flag
                     unsafe { (&mut *buffer).len &= !INLINE_FLAG; }
-                    // we allocate an additional size_of(usize) bytes for the reference counter to be stored
-                    let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
+                    let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, if FAST_CONVERSION {
+                        // we allocate an additional size_of(usize) * 2 - 1 bytes for the reference counter to be stored
+                        req + ADDITIONAL_BUFFER_CAP
+                    } else {
+                        req
+                    });
                     let alloc = alloc_zeroed_buffer(cap);
                     let len = unsafe { (&*buffer).len };
                     // copy the previous buffer into the newly allocated one
@@ -48,22 +54,22 @@ BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSI
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
-                return outline_buffer::<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>(self as *mut BufferRW<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>, req);
+                return outline_buffer::<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>(self as *mut BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>, req);
             }
-            return unsafe { (self as *mut BufferRW<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>).cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
+            return unsafe { (self as *mut BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>).cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
         }
         // handle buffer reallocation
         if self.cap < self.len + req {
             #[inline(never)]
             #[cold]
-            fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) {
+            fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) {
                 let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(unsafe { (&*buffer).cap }, req);
                 unsafe { (&mut *buffer).cap = new_cap; }
                 let old_alloc = unsafe { (&*buffer).ptr };
                 unsafe { (&mut *buffer).ptr = unsafe { alloc_uninit_buffer((&*buffer).cap) }; }
                 unsafe { ptr::copy_nonoverlapping(old_alloc, (&*buffer).ptr, (&*buffer).len); }
             }
-            resize_alloc(self as *mut BufferRW<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>, req);
+            resize_alloc(self as *mut BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>, req);
         }
         unsafe { self.ptr.add(self.len) }
     }
@@ -75,7 +81,7 @@ BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSI
             panic!("not enough bytes in buffer, expected {} readable bytes but only {} bytes are left", bytes, remaining);
         }
         if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
-            unsafe { (self as *const BufferRW<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>).cast::<u8>().add(size_of::<usize>() * 2 + self.rdx) }
+            unsafe { (self as *const BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>).cast::<u8>().add(size_of::<usize>() * 2 + self.rdx) }
         } else {
             unsafe { self.ptr.add(self.rdx) }
         }
@@ -84,7 +90,7 @@ BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSI
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Deref for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+Deref for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     type Target = [u8];
 
     #[inline]
@@ -94,7 +100,7 @@ Deref for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAS
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Borrow<[u8]> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+Borrow<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn borrow(&self) -> &[u8] {
         self.as_ref()
@@ -102,21 +108,45 @@ Borrow<[u8]> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORA
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Into<Vec<u8>> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+Into<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
     fn into(self) -> Vec<u8> {
-        todo!()
+        unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
     }
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-From<Vec<u8>> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
-    fn from(value: Vec<u8>) -> Self {
-        todo!()
+From<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn from(mut value: Vec<u8>) -> Self {
+        let ptr = value.as_mut_ptr();
+        let cap = value.capacity();
+        let len = value.len();
+        // handle small buffers
+        if INLINE_SMALL && len <= INLINE_SIZE {
+            let mut ret = Self {
+                len,
+                rdx: 0,
+                cap: 0,
+                ptr: null_mut(),
+            };
+            let ret_ptr = &mut ret as *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
+            unsafe { ptr::copy_nonoverlapping(ptr, ret_ptr.cast::<u8>().add(size_of::<usize>() * 2), len); }
+            return ret;
+        }
+        mem::forget(value);
+        // reuse existing buffer
+        Self {
+            len,
+            rdx: 0,
+            cap,
+            ptr,
+        }
     }
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-GenericBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn new() -> Self {
         Self {
@@ -165,7 +195,7 @@ GenericBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STOR
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Clone for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+Clone for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn clone(&self) -> Self {
         if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
@@ -189,11 +219,11 @@ Clone for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAS
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-AsRef<[u8]> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+AsRef<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         let ptr = if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
-            unsafe { (self as *const BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>).cast::<u8>().add(size_of::<usize>() * 2 + self.rdx) }
+            unsafe { (self as *const BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>).cast::<u8>().add(size_of::<usize>() * 2 + self.rdx) }
         } else {
             unsafe { self.ptr.add(self.rdx) }
         };
@@ -202,7 +232,7 @@ AsRef<[u8]> for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-WritableBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
 
     fn with_capacity(cap: usize) -> Self {
         if INLINE_SMALL && cap <= INLINE_SIZE {
@@ -275,7 +305,7 @@ WritableBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STO
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-ReadableBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+ReadableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn remaining(&self) -> usize {
         self.len() - self.rdx
@@ -297,10 +327,10 @@ ReadableBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STO
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-RWBuffer for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
+RWBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {}
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
-Drop for BufferRW<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
     fn drop(&mut self) {
         if !INLINE_SMALL || self.len & INLINE_FLAG == 0 {

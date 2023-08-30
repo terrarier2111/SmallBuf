@@ -59,6 +59,7 @@ Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             let ptr = &self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
             Vec::from(unsafe { &*slice_from_raw_parts(unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }, self.len()) })
         } else {
+            // FIXME: this is wrong!
             unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
         }
     }
@@ -71,6 +72,7 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         let mut cap = value.capacity();
         let len = value.len();
         let available = cap - len;
+        // handle small buffers
         if INLINE_SMALL && len <= INLINE_SIZE {
             let mut ret = Self {
                 len,
@@ -82,6 +84,7 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             unsafe { ptr::copy_nonoverlapping(ptr, ret_ptr.cast::<u8>().add(size_of::<usize>() * 2), len); }
             return ret;
         }
+        // try reusing existing buffer
         let ref_cnt_ptr = if available < ADDITIONAL_SIZE {
             cap = len + ADDITIONAL_SIZE;
             let alloc = unsafe { alloc_uninit_buffer(cap) };
