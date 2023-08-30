@@ -213,11 +213,18 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_
             #[inline(never)]
             #[cold]
             fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>, req: usize) {
-                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(unsafe { (&*buffer).cap }, req);
+                let old_cap = unsafe { (&*buffer).cap };
+                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, if FAST_CONVERSION {
+                    // we allocate an additional size_of(usize) * 2 - 1 bytes for the reference counter to be stored
+                    req + ADDITIONAL_BUFFER_CAP
+                } else {
+                    req
+                });
                 unsafe { (&mut *buffer).cap = new_cap; }
                 let old_alloc = unsafe { (&*buffer).ptr };
                 unsafe { (&mut *buffer).ptr = unsafe { alloc_uninit_buffer((&*buffer).cap) }; }
                 unsafe { ptr::copy_nonoverlapping(old_alloc, (&*buffer).ptr, (&*buffer).len); }
+                unsafe { dealloc(old_alloc, old_cap); }
             }
             resize_alloc(self as *mut BufferMutGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { FAST_CONVERSION }>, req);
         }

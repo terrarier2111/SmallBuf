@@ -24,7 +24,12 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
 
 }
 
-pub trait ReadableBuffer: GenericBuffer {
+pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
+
+    #[inline]
+    fn from_static(buf: &'static [u8]) -> Self {
+        <Self as From<&'static [u8]>>::from(buf)
+    }
 
     fn remaining(&self) -> usize;
 
@@ -204,7 +209,7 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 
 mod tests {
     use std::mem::size_of;
-    use crate::buffer_mut::BufferMutGeneric;
+    use crate::buffer_mut::{BufferMut, BufferMutGeneric};
     use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
     use crate::buffer::{Buffer, BufferGeneric};
     use crate::buffer_rw::BufferRW;
@@ -225,7 +230,6 @@ mod tests {
         let converted = Buffer::from(buffer_2.clone());
         assert_eq!(converted.len(), buffer_2.len());
         assert!(converted.len() > 0);
-        assert_eq!(converted.capacity(), buffer_2.capacity());
         assert!(converted.capacity() > 0);
         let mut cloned = converted.clone();
         assert_eq!(cloned.len(), converted.len());
@@ -238,6 +242,22 @@ mod tests {
 
         let mut buffer = BufferRW::from(cloned);
         assert_eq!(buffer.len(), 19);
+        buffer.put_u64_le(5);
+        assert_eq!(buffer.get_u64_le(), 5);
+    }
+
+    #[test]
+    fn test_static() {
+        static BUFFER: &[u8] = &[56, 2, 8, 46, 15, 9];
+        let mut buffer = Buffer::from_static(BUFFER);
+        assert_eq!(buffer.len(), BUFFER.len());
+        assert_eq!(buffer.get_u8(), BUFFER[0]);
+        assert_eq!(buffer.get_u8(), BUFFER[1]);
+        assert_eq!(buffer.get_u8(), BUFFER[2]);
+        assert_eq!(buffer.get_u8(), BUFFER[3]);
+        assert_eq!(buffer.get_u8(), BUFFER[4]);
+        assert_eq!(buffer.get_u8(), BUFFER[5]);
+        let mut buffer = BufferRW::from(buffer);
         buffer.put_u64_le(5);
         assert_eq!(buffer.get_u64_le(), 5);
     }
