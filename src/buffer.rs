@@ -59,8 +59,16 @@ Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             let ptr = &self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
             Vec::from(unsafe { &*slice_from_raw_parts(unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }, self.len()) })
         } else {
-            // FIXME: this is wrong!
-            unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) }
+            let refs = unsafe { &*align_unaligned_ptr_to(self.ptr, self.len).cast::<AtomicUsize>() }.load(Ordering::Acquire);
+            if refs == 1 {
+                let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
+                mem::forget(self);
+                return ret;
+            }
+            // TODO: should we try to shrink?
+            let alloc = unsafe { alloc_uninit_buffer(self.cap) };
+            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len); }
+            unsafe { Vec::from_raw_parts(alloc, self.cap, self.len) }
         }
     }
 }
@@ -152,8 +160,28 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         self.rdx = 0;
     }
 
+    /// this can lead to a second buffer being allocated while the first buffer staying
+    /// alive. this can happen if the reference count is larger than 1.
     fn shrink(&mut self) {
-        todo!()
+        if INLINE_SMALL && self.len & INLINE_BUFFER_FLAG != 0 {
+            // we have nothing to do as the buffer is stored in line
+            return;
+        }
+        let target_cap = if FAST_CONVERSION {
+            align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(self.ptr, self.len) + size_of::<AtomicUsize>()
+        } else {
+            self.len
+        };
+        if self.cap >= target_cap {
+            // we have nothing to do as our capacity is already as small as possible
+            return;
+        }
+        let alloc = unsafe { alloc_uninit_buffer(target_cap) };
+        unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len); }
+        self.ptr = alloc;
+        self.cap = target_cap;
+        // set ref cnt to 1
+        unsafe { *align_unaligned_ptr_to(alloc, self.len).cast::<usize>() = 1; }
     }
 }
 

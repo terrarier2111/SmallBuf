@@ -190,7 +190,23 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     }
 
     fn shrink(&mut self) {
-        todo!()
+        if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
+            // we have nothing to do as the buffer is stored in line
+            return;
+        }
+        let target_cap = if FAST_CONVERSION {
+            align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(self.ptr, self.len) + size_of::<AtomicUsize>()
+        } else {
+            self.len
+        };
+        if self.cap >= target_cap {
+            // we have nothing to do as our capacity is already as small as possible
+            return;
+        }
+        let alloc = unsafe { alloc_uninit_buffer(target_cap) };
+        unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len); }
+        self.ptr = alloc;
+        self.cap = target_cap;
     }
 }
 
