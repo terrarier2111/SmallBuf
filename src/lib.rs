@@ -1,9 +1,14 @@
+#![feature(generic_const_exprs)]
+
+use std::borrow::Borrow;
+use std::ops::Deref;
+
 pub mod buffer;
 pub mod buffer_rw;
 pub mod buffer_mut;
 mod util;
 
-pub trait GenericBuffer: Clone + AsRef<[u8]> {
+pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8]> + Into<Vec<u8>> + From<Vec<u8>> {
 
     fn new() -> Self;
 
@@ -199,19 +204,20 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 
 mod tests {
     use std::mem::size_of;
-    use crate::buffer_mut::BufferMut;
+    use crate::buffer_mut::BufferMutGeneric;
     use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
-    use crate::buffer::Buffer;
+    use crate::buffer::{Buffer, BufferGeneric};
 
     #[test]
     fn test_buffer_mut() {
-        let mut buffer = BufferMut::new();
+        let mut buffer = BufferMutGeneric::new();
         buffer.put_u64_le(8);
         assert_eq!(buffer.capacity(), size_of::<usize>() * 2);
         assert_eq!(buffer.len(), 8);
         buffer.put_u64_le(7);
         buffer.put_u16_le(1);
-        assert_eq!(buffer.len(), 18);
+        buffer.put_u8(5);
+        assert_eq!(buffer.len(), 19);
         let buffer_2 = buffer.clone();
         buffer.clear();
         assert_eq!(buffer.len(), 0);
@@ -227,6 +233,36 @@ mod tests {
         assert_eq!(cloned.get_u64_le(), 8);
         assert_eq!(cloned.get_u64_le(), 7);
         assert_eq!(cloned.get_u16_le(), 1);
+        assert_eq!(cloned.get_u8(), 5);
     }
 
+}
+
+#[derive(PartialEq, Eq)]
+pub struct BufferCfg {
+    pub inline_small: bool,
+    pub static_storage: bool,
+    pub fast_conversion: bool, // this has to be at least 2
+    pub growth_factor: usize,
+}
+
+impl BufferCfg {
+
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            inline_small: true,
+            static_storage: true,
+            fast_conversion: true,
+            growth_factor: 2,
+        }
+    }
+
+}
+
+impl Default for BufferCfg {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
 }
