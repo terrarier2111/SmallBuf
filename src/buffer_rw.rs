@@ -3,9 +3,11 @@ use std::mem::{align_of, size_of};
 use std::ops::{Add, Deref};
 use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
-use std::sync::atomic::AtomicUsize;
-use crate::util::{align_unaligned_len_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap};
 use crate::{GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
+use crate::buffer::{Buffer, BufferGeneric};
+use crate::buffer_mut::{BufferMut, BufferMutGeneric};
 
 pub type BufferRW = BufferRWGeneric;
 
@@ -142,6 +144,107 @@ From<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
             cap,
             ptr,
         }
+    }
+}
+
+impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const FAST_CONVERSION_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
+From<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn from(value: BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>) -> Self {
+        if INLINE_SMALL && value.len & INLINE_FLAG != 0 {
+            let ret = Self {
+                len: value.len,
+                rdx: value.rdx,
+                cap: value.cap,
+                ptr: value.ptr,
+            };
+            return ret;
+        }
+        let refs = unsafe { &*align_unaligned_ptr_to::<{ align_of::<AtomicUsize>() }>(value.ptr, value.len).cast::<AtomicUsize>() }.load(Ordering::Acquire);
+        if refs == 1 {
+            let ret = Self {
+                len: value.len,
+                rdx: value.rdx,
+                cap: value.cap,
+                ptr: value.ptr,
+            };
+            mem::forget(value);
+            return ret;
+        }
+        // TODO: should we try to shrink?
+        let alloc = unsafe { alloc_uninit_buffer(value.cap) };
+        unsafe { ptr::copy_nonoverlapping(value.ptr, alloc, value.len); }
+        Self {
+            len: value.len,
+            rdx: value.rdx,
+            cap: value.cap,
+            ptr: alloc,
+        }
+    }
+}
+
+impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const FAST_CONVERSION_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
+Into<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn into(self) -> BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER> {
+        if INLINE_SMALL && self.len & INLINE_FLAG != 0 {
+            let ret = BufferGeneric {
+                len: self.len,
+                rdx: self.rdx,
+                cap: self.cap,
+                ptr: self.ptr,
+            };
+            return ret;
+        }
+        let available = self.cap - self.len;
+        let aligned_len = align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(self.ptr, self.len) + size_of::<AtomicUsize>();
+        if available < aligned_len {
+            let alloc = unsafe { alloc_uninit_buffer(self.len + ADDITIONAL_BUFFER_CAP) };
+            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len); }
+            return BufferGeneric {
+                len: self.len,
+                rdx: self.rdx,
+                cap: self.len + ADDITIONAL_BUFFER_CAP,
+                ptr: alloc,
+            };
+        }
+        let ret = BufferGeneric {
+            len: self.len,
+            rdx: self.rdx,
+            cap: self.cap,
+            ptr: self.ptr,
+        };
+        mem::forget(self);
+        ret
+    }
+}
+
+impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const FAST_CONVERSION_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
+From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn from(value: BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>) -> Self {
+        let ret = Self {
+            len: value.len,
+            rdx: 0,
+            cap: value.cap,
+            ptr: value.ptr,
+        };
+        mem::forget(value);
+        ret
+    }
+}
+
+impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const FAST_CONVERSION_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
+Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn into(self) -> BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION_OTHER> {
+        let ret = BufferMutGeneric {
+            len: self.len,
+            cap: self.cap,
+            ptr: self.ptr,
+        };
+        mem::forget(self);
+        ret
     }
 }
 

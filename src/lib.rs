@@ -207,6 +207,7 @@ mod tests {
     use crate::buffer_mut::BufferMutGeneric;
     use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
     use crate::buffer::{Buffer, BufferGeneric};
+    use crate::buffer_rw::BufferRW;
 
     #[test]
     fn test_buffer_mut() {
@@ -234,6 +235,11 @@ mod tests {
         assert_eq!(cloned.get_u64_le(), 7);
         assert_eq!(cloned.get_u16_le(), 1);
         assert_eq!(cloned.get_u8(), 5);
+
+        let mut buffer = BufferRW::from(cloned);
+        assert_eq!(buffer.len(), 19);
+        buffer.put_u64_le(5);
+        assert_eq!(buffer.get_u64_le(), 5);
     }
 
 }
