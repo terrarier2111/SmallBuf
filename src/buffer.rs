@@ -1,11 +1,11 @@
 use std::mem::{align_of, size_of};
-use std::ops::{Add, Deref};
+use std::ops::Deref;
 use std::process::abort;
 use std::{mem, ptr};
 use std::borrow::Borrow;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::{buffer_mut, BufferCfg, GenericBuffer, ReadableBuffer};
+use crate::{buffer_mut, GenericBuffer, ReadableBuffer};
 use crate::buffer_mut::BufferMutGeneric;
 use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, realloc_buffer};
 
@@ -52,11 +52,11 @@ Borrow<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
 Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
     #[inline]
-    fn into(mut self) -> Vec<u8> {
+    fn into(self) -> Vec<u8> {
         // handle inlined buffers
         if self.is_inlined() {
             let ptr = &self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
-            return Vec::from(unsafe { &*slice_from_raw_parts(unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }, self.len()) });
+            return Vec::from(unsafe { &*slice_from_raw_parts(ptr.cast::<u8>().add(size_of::<usize>() * 2), self.len()) });
         }
 
         if !self.is_static() {
@@ -141,11 +141,17 @@ From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, FAST
             mem::forget(value);
             return ret;
         }
-        // FIXME: make this cold!
-        let alloc = unsafe { realloc_buffer(value.ptr, value.len, aligned_len) };
-        let aligned_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<AtomicUsize>() }>(alloc, value.len) };
-        // set ref cnt to 1
-        unsafe { *aligned_ptr.cast::<usize>() = 1; }
+        #[inline(never)]
+        #[cold]
+        fn resize_alloc(ptr: *mut u8, len: usize) -> *mut u8 {
+            let aligned_len = align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(ptr, len) + size_of::<AtomicUsize>();
+            let alloc = unsafe { realloc_buffer(ptr, len, aligned_len) };
+            let aligned_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<AtomicUsize>() }>(alloc, len) };
+            // set ref cnt to 1
+            unsafe { *aligned_ptr.cast::<usize>() = 1; }
+            alloc
+        }
+        let alloc = resize_alloc(value.ptr, value.len);
         Self {
             len: value.len,
             rdx: 0,
@@ -311,7 +317,8 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CON
             self.rdx
         };
         if self.is_inlined() {
-            unsafe { (self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>).cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
+            let ptr = self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
+            unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
         } else {
             unsafe { self.ptr.add(rdx) }
         }
@@ -360,7 +367,8 @@ AsRef<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_S
             self.rdx
         };
         let ptr = if self.is_inlined() {
-            unsafe { (self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>).cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
+            let ptr = self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION>;
+            unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
         } else {
             unsafe { self.ptr.add(rdx) }
         };

@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 use std::mem::{align_of, size_of};
-use std::ops::{Add, Deref};
+use std::ops::Deref;
 use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::AtomicUsize;
@@ -187,6 +187,7 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAST_CONVERSION> {
 
     #[inline]
     fn ensure_large_enough(&mut self, req: usize) -> *mut u8 {
+        let ptr = self as *mut BufferMutGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { FAST_CONVERSION }>;
         if self.is_inlined() {
             if self.len() + req > INLINE_SIZE {
                 #[cold]
@@ -201,15 +202,15 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAST_CONVERSION> {
                         req
                     });
                     let len = unsafe { (&*buffer).len };
-                    let alloc = unsafe { realloc_buffer(unsafe { buffer.cast::<u8>().add(size_of::<usize>()) }, len, cap) };
+                    let alloc = unsafe { realloc_buffer(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
-                return outline_buffer(self as *mut BufferMutGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { FAST_CONVERSION }>, req);
+                return outline_buffer(ptr, req);
             }
-            return unsafe { (self as *mut BufferMutGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { FAST_CONVERSION }>).cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
+            return unsafe { ptr.cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
         }
         // handle buffer reallocation
         if self.cap < self.len + req {
@@ -223,7 +224,7 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAST_CONVERSION> {
                 } else {
                     req
                 });
-                let alloc = unsafe { realloc_buffer_and_dealloc(unsafe { (&*buffer).ptr }, (&*buffer).len, old_cap, new_cap) };
+                let alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, (&*buffer).len, old_cap, new_cap) };
                 unsafe { (&mut *buffer).ptr = alloc; }
                 unsafe { (&mut *buffer).cap = new_cap; }
             }

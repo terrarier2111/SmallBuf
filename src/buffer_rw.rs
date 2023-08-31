@@ -1,13 +1,13 @@
 use std::borrow::Borrow;
 use std::mem::{align_of, size_of};
-use std::ops::{Add, Deref};
+use std::ops::Deref;
 use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap, realloc_buffer, realloc_buffer_and_dealloc};
 use crate::{GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
-use crate::buffer::{Buffer, BufferGeneric};
-use crate::buffer_mut::{BufferMut, BufferMutGeneric};
+use crate::buffer::BufferGeneric;
+use crate::buffer_mut::BufferMutGeneric;
 
 pub type BufferRW = BufferRWGeneric;
 
@@ -60,7 +60,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_C
                         req
                     });
                     let len = unsafe { (&*buffer).len };
-                    let alloc = unsafe { realloc_buffer(unsafe { buffer.cast::<u8>().add(size_of::<usize>()) }, len, cap) };
+                    let alloc = unsafe { realloc_buffer(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
 
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
@@ -97,7 +97,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_C
                 } else {
                     req
                 });
-                let new_alloc = unsafe { realloc_buffer_and_dealloc(unsafe { (&*buffer).ptr }, (&*buffer).len, old_cap, new_cap) };
+                let new_alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, (&*buffer).len, old_cap, new_cap) };
                 unsafe { (&mut *buffer).ptr = new_alloc; }
                 unsafe { (&mut *buffer).cap = new_cap; }
             }
