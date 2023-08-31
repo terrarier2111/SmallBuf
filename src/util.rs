@@ -1,5 +1,6 @@
 use std::{alloc, ptr};
 use std::alloc::{alloc, alloc_zeroed, Layout};
+use std::mem::transmute;
 
 pub(crate) fn alloc_zeroed_buffer(len: usize) -> *mut u8 {
     let alloc = unsafe { alloc_zeroed(Layout::array::<u8>(len).unwrap()) };
@@ -31,6 +32,18 @@ pub(crate) fn find_sufficient_cap<const GROWTH_FACTOR: usize>(curr: usize, req: 
         }
         curr *= GROWTH_FACTOR;
     }
+}
+
+/// this offsets dst by OFFSET if src and dst are equal.
+/// this implementation is special because it is fully branchless.
+///
+/// SAFETY: dst has to be greater than src.
+///         adding offset to dst has to produce a valid pointer.
+#[inline]
+pub(crate) unsafe fn offset_if_equal<const OFFSET: usize>(src: *mut u8, dst: *mut u8) -> *mut u8 {
+    let diff = dst as usize - src as usize;
+    let is_zero = (!diff).overflowing_add(1).1;
+    unsafe { dst.add(transmute::<bool, u8>(is_zero) as usize) }
 }
 
 #[inline]
@@ -70,4 +83,13 @@ pub(crate) unsafe fn realloc_buffer_and_dealloc(buf: *mut u8, len: usize, old_ca
     let alloc = unsafe { realloc_buffer(buf, len, new_cap) };
     unsafe { dealloc(buf, old_cap); }
     alloc
+}
+
+#[inline]
+pub(crate) const fn min(left: usize, right: usize) -> usize {
+    if left < right {
+        left
+    } else {
+        right
+    }
 }
