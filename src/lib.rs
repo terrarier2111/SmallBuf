@@ -1,16 +1,24 @@
 #![feature(generic_const_exprs)]
 
 use std::borrow::Borrow;
-use std::ops::Deref;
+use std::ops::{Deref, RangeBounds};
 
 pub mod buffer;
 pub mod buffer_rw;
 pub mod buffer_mut;
 mod util;
 
+// FIXME: restructure the mut buffers to store their capacity in their allocations such that we can subslice them
+
 pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8]> + Into<Vec<u8>> + From<Vec<u8>> {
 
+    /// creates a new empty instance of a buffer
     fn new() -> Self;
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     fn len(&self) -> usize;
 
@@ -22,6 +30,8 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
     /// buffer, but may be larger than that as this operation operates on a best-effort basis.
     fn shrink(&mut self);
 
+    fn truncate(&mut self, len: usize);
+
 }
 
 pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
@@ -31,7 +41,31 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
         <Self as From<&'static [u8]>>::from(buf)
     }
 
+    /// this will return the amount of remaining bytes that can be
+    /// read from this buffer
     fn remaining(&self) -> usize;
+
+    /// the range represents a range offset to the current reader
+    /// index.
+    fn slice(&self, range_offset: impl RangeBounds<usize>) -> Self;
+
+    /// this will split off everything past offset bytes from the current
+    /// reader index and return a buffer to the split-off buffer.
+    ///
+    /// offset represents an offset from the current reader index
+    fn split_off(&mut self, offset: usize) -> Self;
+
+    /// splits off everything before the current reader index offset by
+    /// the offset parameter, returning the split-off buffer.
+    ///
+    /// offset represents an offset from the current reader index
+    fn split_to(&mut self, offset: usize) -> Self;
+
+    /// this will split the current view at the current reader index,
+    /// leaving the current buffer empty.
+    fn split(&mut self) -> Self;
+
+    fn unsplit(&mut self, other: Self);
 
     fn get_bytes(&mut self, bytes: usize) -> &[u8];
 

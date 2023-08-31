@@ -175,6 +175,17 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAS
         self.ptr = alloc;
         self.cap = target_cap;
     }
+
+    #[inline]
+    fn truncate(&mut self, len: usize) {
+        if self.len() > len {
+            if INLINE_SMALL {
+                self.len = len | (self.len & INLINE_FLAG);
+            } else {
+                self.len = len;
+            }
+        }
+    }
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const FAST_CONVERSION: bool>
@@ -317,5 +328,13 @@ Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAST_CONVERS
             return;
         }
         unsafe { dealloc(self.ptr, self.cap); }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const FAST_CONVERSION: bool>
+Default for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, FAST_CONVERSION> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }

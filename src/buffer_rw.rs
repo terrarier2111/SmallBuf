@@ -357,6 +357,17 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
         self.ptr = alloc;
         self.cap = target_cap;
     }
+
+    #[inline]
+    fn truncate(&mut self, len: usize) {
+        if self.len() > len {
+            if INLINE_SMALL {
+                self.len = len | (self.len & INLINE_BUFFER_FLAG);
+            } else {
+                self.len = len;
+            }
+        }
+    }
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
@@ -493,6 +504,10 @@ ReadableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
         self.len() - rdx
     }
 
+    fn split_off(&mut self, at: usize) -> Self {
+        todo!()
+    }
+
     #[inline]
     fn get_bytes(&mut self, bytes: usize) -> &[u8] {
         let ptr = self.ensure_readable(bytes);
@@ -528,5 +543,13 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
             return;
         }
         unsafe { dealloc(self.ptr, self.cap); }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const FAST_CONVERSION: bool>
+Default for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, FAST_CONVERSION> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }
