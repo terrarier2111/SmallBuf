@@ -59,8 +59,7 @@ Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     fn into(self) -> Vec<u8> {
         // handle inlined buffers
         if self.is_inlined() {
-            let ptr = &self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>;
-            return Vec::from(unsafe { &*slice_from_raw_parts(ptr.cast::<u8>().add(size_of::<usize>() * 2), self.len()) });
+            return Vec::from(unsafe { &*slice_from_raw_parts(self.inlined_buffer_ptr(), self.len()) });
         }
 
         if self.is_static() {
@@ -88,13 +87,12 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         // handle small buffers
         if INLINE_SMALL && len <= INLINE_SIZE {
             let mut ret = Self {
-                len,
+                len: len | INLINE_BUFFER_FLAG,
                 rdx: 0,
                 alloc_len: 0,
                 ptr: null_mut(),
             };
-            let ret_ptr = &mut ret as *mut BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>;
-            unsafe { ptr::copy_nonoverlapping(ptr, ret_ptr.cast::<u8>().add(size_of::<usize>() * 2), len); }
+            unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
             return ret;
         }
         // try reusing existing buffer
@@ -187,12 +185,15 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         if self.is_static() {
             let cap = self.len + ADDITIONAL_SIZE;
             let alloc = unsafe { realloc_buffer(self.ptr, self.len, cap) };
-            return BufferMutGeneric {
+            let ret = BufferMutGeneric {
                 len: self.len,
                 alloc_len: self.alloc_len,
                 ptr: alloc,
                 cap,
             };
+            // set ref cnt
+            unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+            return ret;
         }
         if unsafe { self.is_only() } {
             let ret = BufferMutGeneric {
@@ -206,12 +207,15 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         }
         let alloc = unsafe { realloc_buffer(self.ptr, self.len, self.len + ADDITIONAL_SIZE) };
         
-        BufferMutGeneric {
+        let ret = BufferMutGeneric {
             len: self.len,
             alloc_len: self.alloc_len,
             ptr: alloc,
             cap: self.len + ADDITIONAL_SIZE,
-        }
+        };
+        // set ref cnt
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        ret
     }
 }
 
@@ -288,7 +292,7 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         let cap = self.capacity();
         unsafe { dealloc(old, cap); }
         self.ptr = alloc;
-        // set ref cnt to 1
+        // set metadata
         unsafe { *self.meta_ptr().cast::<usize>() = 1; }
         unsafe { *self.meta_ptr().cast::<usize>().add(1) = target_cap; }
     }
@@ -365,8 +369,15 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     /// SAFETY: this may only be called if the buffer isn't
     /// inlined and isn't a static buffer
     #[inline]
-    unsafe fn meta_ptr(&self) -> *mut u8 {
+    pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
         unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(self.ptr, self.alloc_len) }
+    }
+
+    /// SAFETY: this may only be called if the buffer is inlined.
+    #[inline]
+    unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
+        let ptr = self as *const BufferGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
+        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
     }
 
 }
@@ -462,13 +473,13 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 AsRef<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        let rdx = self.raw_rdx();
         let ptr = if self.is_inlined() {
-            let ptr = self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>;
-            unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
+            unsafe { self.inlined_buffer_ptr() }
         } else {
-            unsafe { self.ptr.add(rdx) }
+            self.ptr
         };
+        let rdx = self.raw_rdx();
+        let ptr = unsafe { ptr.add(rdx) };
         unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
     }
 }

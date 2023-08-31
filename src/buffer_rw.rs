@@ -71,6 +71,8 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
+                    // set ref cnt
+                    unsafe { *(&*buffer).meta_ptr().cast::<usize>() = 1; }
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
@@ -84,6 +86,8 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
             let alloc = unsafe { realloc_buffer(self.ptr, self.len, cap) };
             self.ptr = alloc;
             self.cap = cap;
+            // set ref cnt
+            unsafe { *self.meta_ptr().cast::<usize>() = 1; }
             // mark the buffer as non static
             self.rdx &= !STATIC_BUFFER_FLAG;
         }
@@ -97,6 +101,8 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
                 let new_alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, (&*buffer).len, old_cap, new_cap) };
                 unsafe { (&mut *buffer).ptr = new_alloc; }
                 unsafe { (&mut *buffer).cap = new_cap; }
+                // set ref cnt
+                unsafe { *(&*buffer).meta_ptr().cast::<usize>() = 1; }
             }
             resize_alloc(self as *mut BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>, req);
         }
@@ -128,6 +134,13 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(self.ptr, self.alloc_len) }
     }
 
+    /// SAFETY: this may only be called if the buffer is inlined.
+    #[inline]
+    unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
+        let ptr = self as *const BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
+        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
+    }
+
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
@@ -152,14 +165,23 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 Into<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn into(self) -> Vec<u8> {
+        if self.is_inlined() {
+            let alloc = unsafe { realloc_buffer(self.inlined_buffer_ptr(), self.len(), self.len()) }; // FIXME: should we add ADDITIONAL_SIZE?
+            return unsafe { Vec::from_raw_parts(alloc, self.len(), self.len()) };
+        }
         if self.is_static() {
             let cap = self.len + ADDITIONAL_BUFFER_CAP;
             let alloc = unsafe { realloc_buffer(self.ptr, self.len, cap) };
             return unsafe { Vec::from_raw_parts(alloc, self.len, cap) };
         }
-        let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
-        mem::forget(self);
-        ret
+        if unsafe { self.is_only() } {
+            let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
+            mem::forget(self);
+            return ret;
+        }
+        // FIXME: should we try to shrink?
+        let buf = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
+        unsafe { Vec::from_raw_parts(buf, self.len, self.cap) }
     }
 }
 
@@ -172,26 +194,29 @@ From<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
         let len = value.len();
         // handle small buffers
         if INLINE_SMALL && len <= INLINE_SIZE {
+            // FIXME: should we instead keep the small buffer if it exists already and doesn't cost us anything?
             let mut ret = Self {
-                len,
+                len: len | INLINE_BUFFER_FLAG,
                 rdx: 0,
                 alloc_len: 0,
                 ptr: null_mut(),
                 cap: 0,
             };
-            let ret_ptr = &mut ret as *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>;
-            unsafe { ptr::copy_nonoverlapping(ptr, ret_ptr.cast::<u8>().add(size_of::<usize>() * 2), len); }
+            unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
             return ret;
         }
         mem::forget(value);
         // reuse existing buffer
-        Self {
+        let ret = Self {
             len,
             rdx: 0,
             alloc_len: len,
             ptr,
             cap,
-        }
+        };
+        // set ref cnt
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        ret
     }
 }
 
@@ -208,14 +233,13 @@ From<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_
                 cap: 0,
             };
         }
-        let refs = unsafe { &*align_unaligned_ptr_to::<{ align_of::<AtomicUsize>() }>(value.ptr, value.len).cast::<AtomicUsize>() }.load(Ordering::Acquire);
-        if refs == 1 {
+        if unsafe { value.is_only() } {
             let ret = Self {
                 len: value.len,
                 rdx: value.rdx,
                 alloc_len: value.alloc_len,
                 ptr: value.ptr,
-                cap: 0,
+                cap: value.capacity(),
             };
             mem::forget(value);
             return ret;
@@ -223,13 +247,16 @@ From<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_
         // TODO: should we try to shrink?
         let cap = value.capacity();
         let alloc = unsafe { realloc_buffer(value.ptr, value.len, cap) };
-        Self {
+        let ret = Self {
             len: value.len,
             rdx: value.rdx,
             alloc_len: value.alloc_len,
             ptr: alloc,
             cap,
-        }
+        };
+        // set ref cnt
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        ret
     }
 }
 
@@ -245,15 +272,28 @@ Into<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for Bu
                 ptr: self.ptr,
             };
         }
+        if unsafe { self.is_only() } {
+            let ret = BufferGeneric {
+                len: self.len,
+                rdx: self.rdx,
+                alloc_len: self.alloc_len,
+                ptr: self.ptr,
+            };
+            mem::forget(self);
+            return ret;
+        }
+
+        // FIXME: should we try to shrink?
+        let alloc = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
         let ret = BufferGeneric {
             len: self.len,
             rdx: self.rdx,
             alloc_len: self.alloc_len,
-            ptr: self.ptr,
+            ptr: alloc,
         };
-        // initialize capacity
-        unsafe { *self.meta_ptr().cast::<usize>().add(1) = self.cap; }
-        mem::forget(self);
+        // initialize metadata
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        unsafe { *ret.meta_ptr().cast::<usize>().add(1) = self.cap; }
         ret
     }
 }
@@ -348,6 +388,8 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
         unsafe { dealloc(old_buf, self.cap); }
         self.ptr = alloc;
         self.cap = target_cap;
+        // set ref cnt
+        unsafe { *self.meta_ptr().cast::<usize>() = 1; }
     }
 
     #[inline]
@@ -379,13 +421,17 @@ Clone for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORA
         // TODO: just increment ref cnt instead of allocating new buffer
 
         let alloc = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
-        Self {
+
+        let ret = Self {
             len: self.len,
             rdx: self.rdx,
             alloc_len: self.alloc_len,
             ptr: alloc,
             cap: self.cap,
-        }
+        };
+        // set ref cnt
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        ret
     }
 }
 
@@ -394,10 +440,11 @@ AsRef<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     #[inline]
     fn as_ref(&self) -> &[u8] {
         let ptr = if self.is_inlined() {
-            unsafe { (self as *const BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>).cast::<u8>().add(size_of::<usize>() * 2 + self.rdx) }
+            unsafe { self.inlined_buffer_ptr() }
         } else {
-            unsafe { self.ptr.add(self.rdx) }
+            unsafe { self.ptr }
         };
+        let ptr = unsafe { ptr.add(self.rdx) };
         unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
     }
 }
@@ -418,13 +465,16 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
         } else {
             let cap = cap + ADDITIONAL_BUFFER_CAP;
             let alloc = unsafe { alloc_uninit_buffer(cap) };
-            Self {
+            let ret = Self {
                 len: 0,
                 rdx: 0,
                 alloc_len: 0,
                 ptr: alloc,
                 cap,
-            }
+            };
+            // set ref cnt
+            unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+            ret
         }
     }
 
@@ -441,13 +491,16 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
         } else {
             let cap =  len + ADDITIONAL_BUFFER_CAP;
             let alloc = alloc_zeroed_buffer(cap);
-            Self {
+            let ret = Self {
                 len,
                 rdx: 0,
                 alloc_len: len,
                 ptr: alloc,
                 cap,
-            }
+            };
+            // set ref cnt
+            unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+            ret
         }
     }
 
@@ -552,7 +605,12 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
             // we don't do anything if there is no allocation
             return;
         }
-        unsafe { dealloc(self.ptr, self.cap); }
+        let meta_ptr = unsafe { self.meta_ptr() };
+        let ref_cnt = unsafe { &*meta_ptr.cast::<AtomicUsize>() };
+        let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // FIXME: can we choose a weaker ordering?
+        if remaining == 0 {
+            unsafe { dealloc(self.ptr, self.cap); }
+        }
     }
 }
 
