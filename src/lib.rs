@@ -1,6 +1,7 @@
 #![feature(generic_const_exprs)]
 
 use std::borrow::Borrow;
+use std::mem::size_of;
 use std::ops::{Deref, RangeBounds};
 
 pub mod buffer;
@@ -248,7 +249,7 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 mod tests {
     use std::mem::size_of;
     use crate::buffer_mut::BufferMut;
-    use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
+    use crate::{GenericBuffer, ReadableBuffer, test, WritableBuffer};
     use crate::buffer::Buffer;
     use crate::buffer_rw::BufferRW;
 
@@ -297,6 +298,7 @@ mod tests {
         assert_eq!(buffer.get_u64_le(), 5);
         let rw_buf: BufferRW = buffer.into();
         assert_eq!(rw_buf.len(), 27);
+        test();
     }
 
     #[test]
@@ -313,35 +315,8 @@ mod tests {
         let mut buffer = BufferRW::from(buffer);
         buffer.put_u64_le(5);
         assert_eq!(buffer.get_u64_le(), 5);
+        // let mut buf_mut = BufferMut::from(buffer); // FIXME: figure out why this impl isn't there
+        // buf_mut.put_u8(3);
     }
 
-}
-
-#[derive(PartialEq, Eq)]
-pub struct BufferCfg {
-    pub inline_small: bool,
-    pub static_storage: bool,
-    pub initial_cap: usize, // this has to be at least 32
-    pub growth_factor: usize, // this has to be at least 2
-}
-
-impl BufferCfg {
-
-    #[inline]
-    pub const fn new() -> Self {
-        Self {
-            inline_small: true,
-            static_storage: true,
-            initial_cap: 32,
-            growth_factor: 2,
-        }
-    }
-
-}
-
-impl Default for BufferCfg {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
 }

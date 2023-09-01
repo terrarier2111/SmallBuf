@@ -6,14 +6,18 @@ use std::borrow::Borrow;
 use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer};
+use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer};
 use crate::buffer_mut::BufferMutGeneric;
 use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted};
 
 pub type Buffer = BufferGeneric;
 
+// TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
+// INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
+const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+
 #[repr(C)]
-pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
+pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
     pub(crate) len: usize, // the last bit indicates whether the allocation is in-line
     pub(crate) rdx: usize, // the last bit indicates whether the allocation is static
     pub(crate) cap: usize, // this is the capacity of the whole allocation
@@ -37,6 +41,311 @@ unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_S
 Sync for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {}
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+
+    #[inline]
+    pub(crate) fn is_static(&self) -> bool {
+        STATIC_STORAGE && self.rdx & STATIC_BUFFER_FLAG != 0
+    }
+
+    #[inline]
+    pub(crate) fn is_inlined(&self) -> bool {
+        INLINE_SMALL && self.len & INLINE_BUFFER_FLAG != 0
+    }
+
+    /// SAFETY: this is only safe to call if the buffer isn't inlined and isn't static.
+    #[inline]
+    pub(crate) unsafe fn is_only(&self) -> bool {
+        let meta_ptr = unsafe { self.meta_ptr() };
+        unsafe { &*meta_ptr.cast::<AtomicUsize>() }.load(Ordering::Acquire) == 1
+    }
+
+    #[inline]
+    fn ensure_readable(&self, bytes: usize) -> *const u8 {
+        let remaining = self.remaining();
+        if remaining < bytes {
+            panic!("not enough bytes in buffer, expected {} readable bytes but only {} bytes are left", bytes, remaining);
+        }
+        let rdx = self.raw_rdx();
+        if self.is_inlined() {
+            unsafe { self.inlined_buffer_ptr().add(rdx) }
+        } else {
+            unsafe { self.ptr.add(rdx) }
+        }
+    }
+
+    #[inline]
+    fn raw_rdx(&self) -> usize {
+        if STATIC_STORAGE {
+            self.rdx & !STATIC_BUFFER_FLAG
+        } else {
+            self.rdx
+        }
+    }
+
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        // for inlined buffers we always have INLINE_SIZE space
+        if self.is_inlined() {
+            return INLINE_SIZE;
+        }
+        self.cap
+    }
+
+    /// SAFETY: this may only be called if the buffer isn't
+    /// inlined and isn't a static buffer
+    #[inline]
+    pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
+        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.ptr, self.cap) }
+    }
+
+    /// SAFETY: this may only be called if the buffer is inlined.
+    #[inline]
+    unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
+        let ptr = self as *const BufferGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
+        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
+    }
+
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    #[inline]
+    fn new() -> Self {
+        if !INLINE_SMALL && STATIC_STORAGE {
+            static EMPTY: &[u8] = &[];
+            return Self::from(EMPTY);
+        }
+        Self {
+            len: if INLINE_SMALL {
+                0 | INLINE_BUFFER_FLAG
+            } else {
+                0
+            },
+            rdx: 0,
+            cap: 0,
+            ptr: if INLINE_SMALL {
+                null_mut()
+            } else {
+                empty_sentinel()
+            },
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        if INLINE_SMALL {
+            self.len & !INLINE_BUFFER_FLAG
+        } else {
+            self.len
+        }
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        let _ = mem::replace(self, BufferGeneric::new());
+    }
+
+    /// this can lead to a second buffer being allocated while the first buffer staying
+    /// alive. this can happen if the reference count is larger than 1.
+    fn shrink(&mut self) {
+        if self.is_inlined() {
+            // we have nothing to do as the buffer is stored in line
+            return;
+        }
+        if self.is_static() {
+            // we have nothing to do for static buffers
+            return;
+        }
+        if !unsafe { self.is_only() } {
+            // For now we just nop for buffers we don't completely own.
+            return;
+        }
+        let target_cap = self.len + ADDITIONAL_BUFFER_CAP;
+        if self.capacity() <= target_cap {
+            // we have nothing to do as our capacity is already as small as possible
+            return;
+        }
+        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, target_cap) };
+        let old = self.ptr;
+        let cap = self.capacity();
+        unsafe { dealloc(old, cap); }
+        self.ptr = alloc;
+    }
+
+    #[inline]
+    fn truncate(&mut self, len: usize) {
+        if self.len() > len {
+            if INLINE_SMALL {
+                self.len = len | (self.len & INLINE_BUFFER_FLAG);
+            } else {
+                self.len = len;
+            }
+        }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.len() - self.raw_rdx()
+    }
+
+    #[inline]
+    fn split_off(&mut self, offset: usize) -> Self {
+        let idx = self.raw_rdx() + offset;
+        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let mut other = self.clone();
+
+        let len_flag = if INLINE_SMALL {
+            self.len & INLINE_BUFFER_FLAG
+        } else {
+            0
+        };
+        let rdx_flag = if STATIC_STORAGE {
+            self.rdx & STATIC_BUFFER_FLAG
+        } else {
+            0
+        };
+
+        self.len = idx | len_flag;
+        other.rdx = idx | rdx_flag;
+
+        other
+    }
+
+    #[inline]
+    fn split_to(&mut self, offset: usize) -> Self {
+        let idx = self.raw_rdx() + offset;
+        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let mut other = self.clone();
+
+        let rdx_flag = if STATIC_STORAGE {
+            self.rdx & STATIC_BUFFER_FLAG
+        } else {
+            0
+        };
+        let len_flag = if INLINE_SMALL {
+            self.len & INLINE_BUFFER_FLAG
+        } else {
+            0
+        };
+
+        self.rdx = idx | rdx_flag;
+        other.len = idx | len_flag;
+
+        other
+    }
+
+    #[inline]
+    fn split(&mut self) -> Self {
+        // TODO: check if the panic check gets removed
+        self.split_off(0)
+    }
+
+    fn unsplit(&mut self, other: Self) {
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+
+        todo!()
+    }
+
+    #[inline]
+    fn get_bytes(&mut self, bytes: usize) -> &[u8] {
+        let ptr = self.ensure_readable(bytes);
+        self.rdx += bytes;
+        unsafe { &*slice_from_raw_parts(ptr, bytes) }
+    }
+
+    #[inline]
+    fn get_u8(&mut self) -> u8 {
+        let ptr = self.ensure_readable(1);
+        self.rdx += 1;
+        unsafe { *ptr }
+    }
+
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+ReadonlyBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    fn slice(&self, range_offset: impl RangeBounds<usize>) -> Self {
+        todo!()
+    }
+}
+
+const MAX_REF_CNT: usize = usize::MAX / 2;
+
+#[inline]
+fn increment_ref_cnt(ref_cnt: &AtomicUsize) {
+    let val = ref_cnt.fetch_add(1, Ordering::AcqRel); // FIXME: can we choose a weaker ordering?
+    if val > MAX_REF_CNT {
+        abort();
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+Drop for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    fn drop(&mut self) {
+        if self.is_inlined() {
+            // we don't need to do anything for inlined buffers
+            return;
+        }
+        if self.is_static() {
+            // we don't need to do anything for static buffers
+            return;
+        }
+        if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
+            // we don't do anything for empty buffers
+            return;
+        }
+        let meta_ptr = unsafe { self.meta_ptr() };
+        let ref_cnt = unsafe { &*meta_ptr.cast::<AtomicUsize>() };
+        let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // FIXME: can we choose a weaker ordering?
+        if remaining == 0 {
+            let cap = self.capacity();
+            unsafe { dealloc(self.ptr.cast::<u8>(), cap); }
+        }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+Clone for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.is_inlined() && !self.is_static() {
+            let meta_ptr = unsafe { self.meta_ptr() };
+            // increase the ref cnt if the buffer isn't inlined
+            increment_ref_cnt(unsafe { &*meta_ptr.cast::<AtomicUsize>() });
+        }
+        Self {
+            len: self.len,
+            rdx: self.rdx,
+            cap: self.cap,
+            ptr: self.ptr,
+        }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+AsRef<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        let ptr = if self.is_inlined() {
+            unsafe { self.inlined_buffer_ptr() }
+        } else {
+            self.ptr
+        };
+        let rdx = self.raw_rdx();
+        let ptr = unsafe { ptr.add(rdx) };
+        unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
 Deref for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     type Target = [u8];
 
@@ -51,6 +360,27 @@ Borrow<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_
     #[inline]
     fn borrow(&self) -> &[u8] {
         self.as_ref()
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+Default for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+From<&'static [u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+    #[inline]
+    fn from(value: &'static [u8]) -> Self {
+        Self {
+            len: value.len(),
+            rdx: 0 | STATIC_BUFFER_FLAG,
+            cap: value.len(),
+            ptr: value.as_ptr().cast_mut(),
+        }
     }
 }
 
@@ -204,324 +534,5 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
             cap: self.len + ADDITIONAL_BUFFER_CAP,
             offset: self.rdx,
         }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-From<&'static [u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    #[inline]
-    fn from(value: &'static [u8]) -> Self {
-        Self {
-            len: value.len(),
-            rdx: 0 | STATIC_BUFFER_FLAG,
-            cap: value.len(),
-            ptr: value.as_ptr().cast_mut(),
-        }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    #[inline]
-    fn new() -> Self {
-        if !INLINE_SMALL && STATIC_STORAGE {
-            static EMPTY: &[u8] = &[];
-            return Self::from(EMPTY);
-        }
-        Self {
-            len: if INLINE_SMALL {
-                0 | INLINE_BUFFER_FLAG
-            } else {
-                0
-            },
-            rdx: 0,
-            cap: 0,
-            ptr: if INLINE_SMALL {
-                null_mut()
-            } else {
-                empty_sentinel()
-            },
-        }
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        if INLINE_SMALL {
-            self.len & !INLINE_BUFFER_FLAG
-        } else {
-            self.len
-        }
-    }
-
-    #[inline]
-    fn clear(&mut self) {
-        let _ = mem::replace(self, BufferGeneric::new());
-    }
-
-    /// this can lead to a second buffer being allocated while the first buffer staying
-    /// alive. this can happen if the reference count is larger than 1.
-    fn shrink(&mut self) {
-        if self.is_inlined() {
-            // we have nothing to do as the buffer is stored in line
-            return;
-        }
-        if self.is_static() {
-            // we have nothing to do for static buffers
-            return;
-        }
-        if !unsafe { self.is_only() } {
-            // For now we just nop for buffers we don't completely own.
-            return;
-        }
-        let target_cap = self.len + ADDITIONAL_BUFFER_CAP;
-        if self.capacity() <= target_cap {
-            // we have nothing to do as our capacity is already as small as possible
-            return;
-        }
-        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, target_cap) };
-        let old = self.ptr;
-        let cap = self.capacity();
-        unsafe { dealloc(old, cap); }
-        self.ptr = alloc;
-    }
-
-    #[inline]
-    fn truncate(&mut self, len: usize) {
-        if self.len() > len {
-            if INLINE_SMALL {
-                self.len = len | (self.len & INLINE_BUFFER_FLAG);
-            } else {
-                self.len = len;
-            }
-        }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-
-    #[inline]
-    pub(crate) fn is_static(&self) -> bool {
-        STATIC_STORAGE && self.rdx & STATIC_BUFFER_FLAG != 0
-    }
-
-    #[inline]
-    pub(crate) fn is_inlined(&self) -> bool {
-        INLINE_SMALL && self.len & INLINE_BUFFER_FLAG != 0
-    }
-
-    /// SAFETY: this is only safe to call if the buffer isn't inlined and isn't static.
-    #[inline]
-    pub(crate) unsafe fn is_only(&self) -> bool {
-        let meta_ptr = unsafe { self.meta_ptr() };
-        unsafe { &*meta_ptr.cast::<AtomicUsize>() }.load(Ordering::Acquire) == 1
-    }
-
-    #[inline]
-    fn ensure_readable(&self, bytes: usize) -> *const u8 {
-        let remaining = self.remaining();
-        if remaining < bytes {
-            panic!("not enough bytes in buffer, expected {} readable bytes but only {} bytes are left", bytes, remaining);
-        }
-        let rdx = self.raw_rdx();
-        if self.is_inlined() {
-            unsafe { self.inlined_buffer_ptr().add(rdx) }
-        } else {
-            unsafe { self.ptr.add(rdx) }
-        }
-    }
-
-    #[inline]
-    fn raw_rdx(&self) -> usize {
-        if STATIC_STORAGE {
-            self.rdx & !STATIC_BUFFER_FLAG
-        } else {
-            self.rdx
-        }
-    }
-
-    #[inline]
-    pub(crate) fn capacity(&self) -> usize {
-        // for inlined buffers we always have INLINE_SIZE space
-        if self.is_inlined() {
-            return INLINE_SIZE;
-        }
-        self.cap
-    }
-
-    /// SAFETY: this may only be called if the buffer isn't
-    /// inlined and isn't a static buffer
-    #[inline]
-    pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
-        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.ptr, self.cap) }
-    }
-
-    /// SAFETY: this may only be called if the buffer is inlined.
-    #[inline]
-    unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
-        let ptr = self as *const BufferGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
-        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
-    }
-
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.len() - self.raw_rdx()
-    }
-
-    #[inline]
-    fn split_off(&mut self, offset: usize) -> Self {
-        let idx = self.raw_rdx() + offset;
-        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
-        let mut other = self.clone();
-
-        let len_flag = if INLINE_SMALL {
-            self.len & INLINE_BUFFER_FLAG
-        } else {
-            0
-        };
-        let rdx_flag = if STATIC_STORAGE {
-            self.rdx & STATIC_BUFFER_FLAG
-        } else {
-            0
-        };
-
-        self.len = idx | len_flag;
-        other.rdx = idx | rdx_flag;
-
-        other
-    }
-
-    #[inline]
-    fn split_to(&mut self, offset: usize) -> Self {
-        let idx = self.raw_rdx() + offset;
-        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
-        let mut other = self.clone();
-
-        let rdx_flag = if STATIC_STORAGE {
-            self.rdx & STATIC_BUFFER_FLAG
-        } else {
-            0
-        };
-        let len_flag = if INLINE_SMALL {
-            self.len & INLINE_BUFFER_FLAG
-        } else {
-            0
-        };
-
-        self.rdx = idx | rdx_flag;
-        other.len = idx | len_flag;
-
-        other
-    }
-
-    #[inline]
-    fn split(&mut self) -> Self {
-        // TODO: check if the panic check gets removed
-        self.split_off(0)
-    }
-
-    fn unsplit(&mut self, other: Self) {
-        if self.is_empty() {
-            *self = other;
-            return;
-        }
-
-        todo!()
-    }
-
-    #[inline]
-    fn get_bytes(&mut self, bytes: usize) -> &[u8] {
-        let ptr = self.ensure_readable(bytes);
-        self.rdx += bytes;
-        unsafe { &*slice_from_raw_parts(ptr, bytes) }
-    }
-
-    #[inline]
-    fn get_u8(&mut self) -> u8 {
-        let ptr = self.ensure_readable(1);
-        self.rdx += 1;
-        unsafe { *ptr }
-    }
-
-}
-
-const MAX_REF_CNT: usize = usize::MAX / 2;
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-AsRef<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        let ptr = if self.is_inlined() {
-            unsafe { self.inlined_buffer_ptr() }
-        } else {
-            self.ptr
-        };
-        let rdx = self.raw_rdx();
-        let ptr = unsafe { ptr.add(rdx) };
-        unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
-    }
-}
-
-#[inline]
-fn increment_ref_cnt(ref_cnt: &AtomicUsize) {
-    let val = ref_cnt.fetch_add(1, Ordering::AcqRel); // FIXME: can we choose a weaker ordering?
-    if val > MAX_REF_CNT {
-        abort();
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Clone for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    #[inline]
-    fn clone(&self) -> Self {
-        if !self.is_inlined() && !self.is_static() {
-            let meta_ptr = unsafe { self.meta_ptr() };
-            // increase the ref cnt if the buffer isn't inlined
-            increment_ref_cnt(unsafe { &*meta_ptr.cast::<AtomicUsize>() });
-        }
-        Self {
-            len: self.len,
-            rdx: self.rdx,
-            cap: self.cap,
-            ptr: self.ptr,
-        }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Drop for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    fn drop(&mut self) {
-        if self.is_inlined() {
-            // we don't need to do anything for inlined buffers
-            return;
-        }
-        if self.is_static() {
-            // we don't need to do anything for static buffers
-            return;
-        }
-        if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
-            // we don't do anything for empty buffers
-            return;
-        }
-        let meta_ptr = unsafe { self.meta_ptr() };
-        let ref_cnt = unsafe { &*meta_ptr.cast::<AtomicUsize>() };
-        let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // FIXME: can we choose a weaker ordering?
-        if remaining == 0 {
-            let cap = self.capacity();
-            unsafe { dealloc(self.ptr.cast::<u8>(), cap); }
-        }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Default for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
     }
 }

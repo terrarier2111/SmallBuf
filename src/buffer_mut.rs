@@ -6,17 +6,21 @@ use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer, buffer_rw, GenericBuffer, WritableBuffer};
+use crate::buffer_rw::BufferRWGeneric;
 use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 
 pub type BufferMut = BufferMutGeneric;
 
+// TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
+// INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
+const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+
 #[repr(C)]
-pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true> {
+pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true> {
     pub(crate) len: usize,
     pub(crate) cap: usize,
-    pub(crate) ptr: *mut u8, // FIXME: we can make this non-null if we ensure that this will never be used as inline buffer storage
-                             // FIXME: for this we will have to do some funky transmutes on conversion from/to buffer if inlined
     pub(crate) offset: usize, // this is an offset into the allocation
+    pub(crate) ptr: *mut u8,
 }
 
 /// the MSB will never be used as allocations are capped at isize::MAX
@@ -33,112 +37,6 @@ unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_S
 Send for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
 unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
 Sync for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    #[inline]
-    fn clone(&self) -> Self {
-        if self.is_inlined() {
-            return Self {
-                len: self.len,
-                offset: self.offset,
-                ptr: self.ptr,
-                cap: self.cap,
-            };
-        }
-
-        // panic!("len: {} cap: {}", self.len, self.cap);
-        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
-        Self {
-            len: self.len,
-            ptr: alloc,
-            cap: self.cap,
-            offset: self.offset,
-        }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-AsRef<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        let ptr = if self.is_inlined() {
-            unsafe { self.inlined_buffer_ptr() }
-        } else {
-            self.ptr
-        };
-        unsafe { &*slice_from_raw_parts(ptr, self.len()) }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Deref for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    type Target = [u8];
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Borrow<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    #[inline]
-    fn borrow(&self) -> &[u8] {
-        self.as_ref()
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    #[inline]
-    fn into(self) -> Vec<u8> {
-        if self.is_inlined() {
-            let alloc = unsafe { realloc_buffer(self.inlined_buffer_ptr(), self.len(), self.len()) }; // FIXME: should we add ADDITIONAL_BUFFER_CAP?
-            return unsafe { Vec::from_raw_parts(alloc, self.len(), self.len()) };
-        }
-        if unsafe { self.is_only() } {
-            let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
-            mem::forget(self);
-            return ret;
-        }
-        // FIXME: should we try to shrink?
-        let buf = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
-        unsafe { Vec::from_raw_parts(buf, self.len, self.cap) }
-    }
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-    fn from(mut value: Vec<u8>) -> Self {
-        let ptr = value.as_mut_ptr();
-        let cap = value.capacity();
-        let len = value.len();
-        // handle small buffers
-        if INLINE_SMALL && len <= INLINE_SIZE {
-            // FIXME: should we instead keep the small buffer if it exists already and doesn't cost us anything?
-            let mut ret = Self {
-                len: len | INLINE_FLAG,
-                ptr: null_mut(),
-                cap: 0,
-                offset: 0,
-            };
-            unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
-            return ret;
-        }
-        mem::forget(value);
-        // reuse existing buffer
-        let ret = Self {
-            len,
-            ptr,
-            cap,
-            offset: 0,
-        };
-        // set ref cnt
-        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
-        ret
-    }
-}
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
 GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
@@ -387,9 +285,115 @@ Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 }
 
 impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    #[inline]
+    fn clone(&self) -> Self {
+        if self.is_inlined() {
+            return Self {
+                len: self.len,
+                offset: self.offset,
+                ptr: self.ptr,
+                cap: self.cap,
+            };
+        }
+
+        // panic!("len: {} cap: {}", self.len, self.cap);
+        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
+        Self {
+            len: self.len,
+            ptr: alloc,
+            cap: self.cap,
+            offset: self.offset,
+        }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+AsRef<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        let ptr = if self.is_inlined() {
+            unsafe { self.inlined_buffer_ptr() }
+        } else {
+            self.ptr
+        };
+        unsafe { &*slice_from_raw_parts(ptr, self.len()) }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Deref for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Borrow<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
 Default for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    #[inline]
+    fn into(self) -> Vec<u8> {
+        if self.is_inlined() {
+            let alloc = unsafe { realloc_buffer(self.inlined_buffer_ptr(), self.len(), self.len()) }; // FIXME: should we add ADDITIONAL_BUFFER_CAP?
+            return unsafe { Vec::from_raw_parts(alloc, self.len(), self.len()) };
+        }
+        if unsafe { self.is_only() } {
+            let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.cap) };
+            mem::forget(self);
+            return ret;
+        }
+        // FIXME: should we try to shrink?
+        let buf = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
+        unsafe { Vec::from_raw_parts(buf, self.len, self.cap) }
+    }
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+    fn from(mut value: Vec<u8>) -> Self {
+        let ptr = value.as_mut_ptr();
+        let cap = value.capacity();
+        let len = value.len();
+        // handle small buffers
+        if INLINE_SMALL && len <= INLINE_SIZE {
+            // FIXME: should we instead keep the small buffer if it exists already and doesn't cost us anything?
+            let mut ret = Self {
+                len: len | INLINE_FLAG,
+                ptr: null_mut(),
+                cap: 0,
+                offset: 0,
+            };
+            unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
+            return ret;
+        }
+        mem::forget(value);
+        // reuse existing buffer
+        let ret = Self {
+            len,
+            ptr,
+            cap,
+            offset: 0,
+        };
+        // set ref cnt
+        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
+        ret
     }
 }
