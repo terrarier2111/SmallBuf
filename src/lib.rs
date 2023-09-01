@@ -321,8 +321,8 @@ mod tests {
 pub struct BufferCfg {
     pub inline_small: bool,
     pub static_storage: bool,
-    pub fast_conversion: bool, // this has to be at least 2
-    pub growth_factor: usize,
+    pub initial_cap: usize, // this has to be at least 32
+    pub growth_factor: usize, // this has to be at least 2
 }
 
 impl BufferCfg {
@@ -332,7 +332,7 @@ impl BufferCfg {
         Self {
             inline_small: true,
             static_storage: true,
-            fast_conversion: true,
+            initial_cap: 32,
             growth_factor: 2,
         }
     }

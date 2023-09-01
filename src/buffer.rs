@@ -8,7 +8,7 @@ use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer};
 use crate::buffer_mut::BufferMutGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, min, realloc_buffer, realloc_buffer_counted};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted};
 
 pub type Buffer = BufferGeneric;
 
@@ -224,6 +224,10 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn new() -> Self {
+        if !INLINE_SMALL && STATIC_STORAGE {
+            static EMPTY: &[u8] = &[];
+            return Self::from(EMPTY);
+        }
         Self {
             len: if INLINE_SMALL {
                 0 | INLINE_BUFFER_FLAG
@@ -232,7 +236,11 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             },
             rdx: 0,
             cap: 0,
-            ptr: null_mut(),
+            ptr: if INLINE_SMALL {
+                null_mut()
+            } else {
+                empty_sentinel()
+            },
         }
     }
 
@@ -494,6 +502,10 @@ Drop for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>
         }
         if self.is_static() {
             // we don't need to do anything for static buffers
+            return;
+        }
+        if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
+            // we don't do anything for empty buffers
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };

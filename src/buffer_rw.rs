@@ -5,7 +5,7 @@ use std::{mem, ptr};
 use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, realloc_buffer_counted_2};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 use crate::{buffer, buffer_mut, GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
 use crate::buffer::BufferGeneric;
 use crate::buffer_mut::BufferMutGeneric;
@@ -68,14 +68,10 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
                     unsafe { (&mut *buffer).len &= !INLINE_BUFFER_FLAG; }
                     let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
                     let len = unsafe { (&*buffer).len };
-                    let (alloc, meta) = unsafe { realloc_buffer_counted_2(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
+                    let alloc = unsafe { realloc_buffer_counted(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
 
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
-                    println!("meta {:?} alloc {:?}", unsafe { (&*buffer).meta_ptr() }, meta);
-                    if unsafe { (&*buffer).is_only() } {
-                        println!("ztest!");
-                    }
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
@@ -328,7 +324,11 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
                 0
             },
             rdx: 0,
-            ptr: null_mut(),
+            ptr: if INLINE_SMALL {
+                null_mut()
+            } else {
+                empty_sentinel()
+            },
             cap: 0,
         }
     }
@@ -576,8 +576,8 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
             // we don't need to do anything for static buffers
             return;
         }
-        if !INLINE_SMALL && self.ptr.is_null() {
-            // we don't do anything if there is no allocation
+        if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
+            // we don't do anything for empty buffers
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };

@@ -94,21 +94,6 @@ const ADDITIONAL_SIZE: usize = METADATA_SIZE + align_of::<usize>() - 1;
 const METADATA_SIZE: usize = size_of::<usize>() * 1;
 
 #[inline]
-pub(crate) unsafe fn realloc_buffer_counted_2(buf: *mut u8, len: usize, new_cap: usize) -> (*mut u8, *mut u8) {
-    let alloc = unsafe { alloc_uninit_buffer(new_cap) };
-    // copy the previous buffer into the newly allocated one
-    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
-
-    // setup metadata
-
-    let meta_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(alloc, new_cap) };
-    assert_eq!(meta_ptr.cast::<usize>() as usize % 8, 0);
-    // set ref cnt
-    unsafe { *meta_ptr.cast::<usize>() = 1; }
-    (alloc, meta_ptr)
-}
-
-#[inline]
 pub(crate) unsafe fn realloc_buffer(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
     let alloc = unsafe { alloc_uninit_buffer(new_cap) };
     // copy the previous buffer into the newly allocated one
@@ -130,4 +115,11 @@ pub(crate) const fn min(left: usize, right: usize) -> usize {
     } else {
         right
     }
+}
+
+static EMPTY_SENTINEL: u8 = 0;
+
+#[inline]
+pub(crate) fn empty_sentinel() -> *mut u8 {
+    (&EMPTY_SENTINEL as *const u8).cast_mut()
 }

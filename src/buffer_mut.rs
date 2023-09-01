@@ -6,7 +6,7 @@ use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer, buffer_rw, GenericBuffer, WritableBuffer};
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, realloc_buffer_counted_2};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 
 pub type BufferMut = BufferMutGeneric;
 
@@ -151,7 +151,11 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                 0
             },
             cap: 0,
-            ptr: null_mut(),
+            ptr: if INLINE_SMALL {
+                null_mut()
+            } else {
+                empty_sentinel()
+            },
             offset: 0,
         }
     }
@@ -237,10 +241,9 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                     let len = unsafe { (&*buffer).len };
                     let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, len + req + ADDITIONAL_BUFFER_CAP);
 
-                    let (alloc, meta) = unsafe { realloc_buffer_counted_2(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
+                    let alloc = unsafe { realloc_buffer_counted(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
-                    println!("alloc: {} meta: {}", meta as usize, unsafe { (&*buffer).meta_ptr() } as usize);
 
                     unsafe { alloc.add(len) }
                 }
@@ -255,8 +258,9 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             #[cold]
             fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL>, req: usize) {
                 let old_cap = unsafe { (&*buffer).cap };
-                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, req + ADDITIONAL_BUFFER_CAP);
-                let alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, (&*buffer).len, old_cap, new_cap) };
+                let len = unsafe { (&*buffer).len };
+                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, len + req + ADDITIONAL_BUFFER_CAP);
+                let alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, len, old_cap, new_cap) };
                 unsafe { (&mut *buffer).ptr = alloc; }
                 unsafe { (&mut *buffer).cap = new_cap; }
                 // set ref cnt
@@ -369,8 +373,8 @@ Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             // we don't need to do anything for inlined buffers
             return;
         }
-        if !INLINE_SMALL && self.ptr.is_null() {
-            // we don't do anything if there is no allocation
+        if !INLINE_SMALL && self.ptr == empty_sentinel() {
+            // we don't do anything for empty buffers
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };
