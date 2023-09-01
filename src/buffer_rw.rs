@@ -148,6 +148,11 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn new() -> Self {
+        if !INLINE_SMALL && STATIC_STORAGE {
+            static EMPTY: &[u8] = &[];
+            return Self::from(EMPTY);
+        }
+
         Self {
             len: if INLINE_SMALL {
                 0 | INLINE_BUFFER_FLAG

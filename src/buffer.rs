@@ -116,6 +116,7 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             static EMPTY: &[u8] = &[];
             return Self::from(EMPTY);
         }
+
         Self {
             len: if INLINE_SMALL {
                 0 | INLINE_BUFFER_FLAG
