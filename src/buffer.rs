@@ -8,7 +8,7 @@ use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer};
 use crate::buffer_mut::BufferMutGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, min, realloc_buffer};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, min, realloc_buffer, realloc_buffer_counted, realloc_buffer_full_meta};
 
 pub type Buffer = BufferGeneric;
 
@@ -149,24 +149,16 @@ From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         #[cold]
         fn resize_alloc(ptr: *mut u8, len: usize) -> *mut u8 {
             let cap = len + ADDITIONAL_SIZE;
-            let alloc = unsafe { realloc_buffer(ptr, len, cap) };
-            let aligned_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<AtomicUsize>() }>(alloc, len) };
-            // init metadata
-            unsafe { *aligned_ptr.cast::<usize>() = 1; }
-            unsafe { *aligned_ptr.cast::<usize>().add(1) = cap; }
+            let alloc = unsafe { realloc_buffer_full_meta(ptr, len, cap) };
             alloc
         }
         let alloc = resize_alloc(value.ptr, value.len);
-        let ret = Self {
+        Self {
             len: value.len,
             rdx: 0,
             alloc_len: value.alloc_len,
             ptr: alloc,
-        };
-        // initialize metadata
-        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
-        unsafe { *ret.meta_ptr().cast::<usize>().add(1) = value.cap; }
-        ret
+        }
     }
 }
 
@@ -205,17 +197,14 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
             mem::forget(self);
             return ret;
         }
-        let alloc = unsafe { realloc_buffer(self.ptr, self.len, self.len + ADDITIONAL_SIZE) };
-        
-        let ret = BufferMutGeneric {
+        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.len + ADDITIONAL_SIZE) };
+
+        BufferMutGeneric {
             len: self.len,
             alloc_len: self.alloc_len,
             ptr: alloc,
             cap: self.len + ADDITIONAL_SIZE,
-        };
-        // set ref cnt
-        unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
-        ret
+        }
     }
 }
 
@@ -287,14 +276,11 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             // we have nothing to do as our capacity is already as small as possible
             return;
         }
-        let alloc = unsafe { realloc_buffer(self.ptr, self.len, target_cap) };
+        let alloc = unsafe { realloc_buffer_full_meta(self.ptr, self.len, target_cap) };
         let old = self.ptr;
         let cap = self.capacity();
         unsafe { dealloc(old, cap); }
         self.ptr = alloc;
-        // set metadata
-        unsafe { *self.meta_ptr().cast::<usize>() = 1; }
-        unsafe { *self.meta_ptr().cast::<usize>().add(1) = target_cap; }
     }
 
     #[inline]
@@ -337,8 +323,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         }
         let rdx = self.raw_rdx();
         if self.is_inlined() {
-            let ptr = self as *const BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>;
-            unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2 + rdx) }
+            unsafe { self.inlined_buffer_ptr().add(rdx) }
         } else {
             unsafe { self.ptr.add(rdx) }
         }

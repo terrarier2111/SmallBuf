@@ -1,6 +1,6 @@
 use std::{alloc, ptr};
 use std::alloc::{alloc, alloc_zeroed, Layout};
-use std::mem::transmute;
+use std::mem::{align_of, transmute};
 
 pub(crate) fn alloc_zeroed_buffer(len: usize) -> *mut u8 {
     let alloc = unsafe { alloc_zeroed(Layout::array::<u8>(len).unwrap()) };
@@ -68,6 +68,52 @@ pub(crate) fn align_unaligned_len_to<const ALIGNMENT: usize>(ptr: *mut u8, len: 
 #[inline]
 pub(crate) unsafe fn align_unaligned_ptr_to<const ALIGNMENT: usize>(ptr: *mut u8, len: usize) -> *mut u8 {
     unsafe { ptr.add(align_unaligned_len_to::<ALIGNMENT>(ptr, len)) }
+}
+
+#[inline]
+pub(crate) unsafe fn realloc_buffer_counted(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
+    let alloc = unsafe { alloc_uninit_buffer(new_cap) };
+    // copy the previous buffer into the newly allocated one
+    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+
+    // setup metadata
+
+    let meta_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(alloc, len) };
+    assert_eq!(meta_ptr.cast::<usize>() as usize % 8, 0);
+    // set ref cnt
+    unsafe { *meta_ptr.cast::<usize>() = 1; }
+    alloc
+}
+
+#[inline]
+pub(crate) unsafe fn realloc_buffer_counted_2(buf: *mut u8, len: usize, new_cap: usize) -> (*mut u8, *mut u8) {
+    let alloc = unsafe { alloc_uninit_buffer(new_cap) };
+    // copy the previous buffer into the newly allocated one
+    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+
+    // setup metadata
+
+    let meta_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(alloc, len) };
+    assert_eq!(meta_ptr.cast::<usize>() as usize % 8, 0);
+    // set ref cnt
+    unsafe { *meta_ptr.cast::<usize>() = 1; }
+    (alloc, meta_ptr)
+}
+
+#[inline]
+pub(crate) unsafe fn realloc_buffer_full_meta(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
+    let alloc = unsafe { alloc_uninit_buffer(new_cap) };
+    // copy the previous buffer into the newly allocated one
+    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+
+    // setup metadata
+
+    let meta_ptr = unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(alloc, len) };
+    // set ref cnt
+    unsafe { *meta_ptr.cast::<usize>() = 1; }
+    // set capacity
+    unsafe { *meta_ptr.cast::<usize>().add(1) = new_cap; }
+    alloc
 }
 
 #[inline]
