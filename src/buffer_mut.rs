@@ -6,17 +6,17 @@ use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer, buffer_rw, GenericBuffer, WritableBuffer};
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, realloc_buffer_counted_2, realloc_buffer_full_meta};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, realloc_buffer_counted_2};
 
 pub type BufferMut = BufferMutGeneric;
 
 #[repr(C)]
 pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = { GROWTH_FACTOR * INLINE_SIZE }, const INLINE_SMALL: bool = true> {
     pub(crate) len: usize,
-    pub(crate) alloc_len: usize,
+    pub(crate) cap: usize,
     pub(crate) ptr: *mut u8, // FIXME: we can make this non-null if we ensure that this will never be used as inline buffer storage
                              // FIXME: for this we will have to do some funky transmutes on conversion from/to buffer if inlined
-    pub(crate) cap: usize,
+    pub(crate) offset: usize, // this is an offset into the allocation
 }
 
 /// the MSB will never be used as allocations are capped at isize::MAX
@@ -25,8 +25,9 @@ const INLINE_FLAG: usize = 1 << (usize::BITS - 1);
 pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferMutGeneric<0, 0, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer::BASE_INLINE_SIZE), buffer_rw::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
-/// capacity and to align said values properly.
-const ADDITIONAL_BUFFER_CAP: usize = size_of::<usize>() * 3 - 1;
+/// to align said values properly.
+const ADDITIONAL_BUFFER_CAP: usize = METADATA_SIZE + align_of::<usize>() - 1;
+const METADATA_SIZE: usize = size_of::<usize>() * 1;
 
 unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
 Send for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
@@ -40,21 +41,19 @@ Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
         if self.is_inlined() {
             return Self {
                 len: self.len,
-                alloc_len: self.alloc_len,
+                offset: self.offset,
                 ptr: self.ptr,
                 cap: self.cap,
             };
         }
 
-        // FIXME: try just incrementing ref cnt!
-
         // panic!("len: {} cap: {}", self.len, self.cap);
         let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
         Self {
             len: self.len,
-            alloc_len: self.alloc_len,
             ptr: alloc,
             cap: self.cap,
+            offset: self.offset,
         }
     }
 }
@@ -95,7 +94,7 @@ Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn into(self) -> Vec<u8> {
         if self.is_inlined() {
-            let alloc = unsafe { realloc_buffer(self.inlined_buffer_ptr(), self.len(), self.len()) }; // FIXME: should we add ADDITIONAL_SIZE?
+            let alloc = unsafe { realloc_buffer(self.inlined_buffer_ptr(), self.len(), self.len()) }; // FIXME: should we add ADDITIONAL_BUFFER_CAP?
             return unsafe { Vec::from_raw_parts(alloc, self.len(), self.len()) };
         }
         if unsafe { self.is_only() } {
@@ -120,9 +119,9 @@ From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             // FIXME: should we instead keep the small buffer if it exists already and doesn't cost us anything?
             let mut ret = Self {
                 len: len | INLINE_FLAG,
-                alloc_len: 0,
                 ptr: null_mut(),
                 cap: 0,
+                offset: 0,
             };
             unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
             return ret;
@@ -131,9 +130,9 @@ From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
         // reuse existing buffer
         let ret = Self {
             len,
-            alloc_len: len,
             ptr,
             cap,
+            offset: 0,
         };
         // set ref cnt
         unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
@@ -152,8 +151,8 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                 0
             },
             cap: 0,
-            alloc_len: 0,
             ptr: null_mut(),
+            offset: 0,
         }
     }
 
@@ -235,18 +234,18 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL>, req: usize) -> *mut u8 {
                     // remove the inline flag
                     unsafe { (&mut *buffer).len &= !INLINE_FLAG; }
-                    let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
                     let len = unsafe { (&*buffer).len };
+                    let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, len + req + ADDITIONAL_BUFFER_CAP);
 
                     let (alloc, meta) = unsafe { realloc_buffer_counted_2(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
-                    unsafe { (&mut *buffer).alloc_len = len };
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
+                    println!("alloc: {} meta: {}", meta as usize, unsafe { (&*buffer).meta_ptr() } as usize);
 
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
-                return outline_buffer(self_ptr, self.len() + req);
+                return outline_buffer(self_ptr, req);
             }
             return unsafe { self_ptr.cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
         }
@@ -272,7 +271,7 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     /// inlined and isn't a static buffer
     #[inline]
     pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
-        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }>(self.ptr, self.alloc_len) }
+        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.ptr, self.cap) }
     }
 
     /// SAFETY: this may only be called if the buffer is inlined.
@@ -292,18 +291,18 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             Self {
                 len: 0 | INLINE_FLAG,
                 // the following two values are now treated as the buffer
-                alloc_len: 0,
                 ptr: null_mut(),
                 cap: 0,
+                offset: 0,
             }
         } else {
             let cap = cap + ADDITIONAL_BUFFER_CAP;
             let alloc = unsafe { alloc_uninit_buffer(cap) };
             let ret = Self {
                 len: 0,
-                alloc_len: 0,
                 ptr: alloc,
                 cap,
+                offset: 0,
             };
             // set ref cnt
             unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
@@ -316,18 +315,18 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             Self {
                 len: len | INLINE_FLAG,
                 // the following two values are now treated as the buffer
-                alloc_len: 0,
                 ptr: null_mut(),
                 cap: 0,
+                offset: 0,
             }
         } else {
             let cap = len + ADDITIONAL_BUFFER_CAP;
             let alloc = alloc_zeroed_buffer(cap);
             let ret = Self {
                 len,
-                alloc_len: len,
                 ptr: alloc,
                 cap,
+                offset: 0,
             };
             // set ref cnt
             unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
@@ -348,6 +347,7 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     fn put_bytes(&mut self, val: &[u8]) {
         let ptr = self.ensure_large_enough(val.len());
         unsafe { ptr::copy_nonoverlapping(val as *const [u8] as *const u8, ptr, val.len()); }
+        // FIXME: does the following simply work with splitting the buffer?
         self.len += val.len();
     }
 
@@ -355,6 +355,7 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     fn put_u8(&mut self, val: u8) {
         let ptr = self.ensure_large_enough(1);
         unsafe { *ptr = val; }
+        // FIXME: does the following simply work with splitting the buffer?
         self.len += 1;
     }
 

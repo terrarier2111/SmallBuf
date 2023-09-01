@@ -255,14 +255,16 @@ mod tests {
     #[test]
     fn test_buffer_mut() {
         let mut buffer = BufferMut::new();
+        buffer.put_u8(2);
         buffer.put_u64_le(8);
         assert_eq!(buffer.capacity(), size_of::<usize>() * 2);
-        assert_eq!(buffer.len(), 8);
+        assert_eq!(buffer.len(), 9);
         buffer.put_u64_le(7);
+        println!("meta ptr: {}", unsafe { buffer.meta_ptr() } as usize);
         buffer.put_u16_le(1);
-        buffer.put_u8(5);
         assert_eq!(buffer.len(), 19);
         assert!(!buffer.is_inlined());
+        println!("meta ptr: {}", unsafe { buffer.meta_ptr() } as usize);
         if unsafe { buffer.is_only() } {
             println!("only!");
         }
@@ -274,18 +276,20 @@ mod tests {
         if unsafe { buffer_2.is_only() } {
             println!("only!");
         }
-        let converted = Buffer::from(buffer_2.clone());
+
+        let mut converted = Buffer::from(buffer_2.clone());
         assert_eq!(converted.len(), buffer_2.len());
         assert!(converted.len() > 0);
         assert!(converted.capacity() > 0);
         let mut cloned = converted.clone();
+        println!("base ptr: {}", cloned.ptr as usize);
         assert_eq!(cloned.len(), converted.len());
         assert_eq!(cloned.capacity(), converted.capacity());
 
+        assert_eq!(cloned.get_u8(), 2);
         assert_eq!(cloned.get_u64_le(), 8);
         assert_eq!(cloned.get_u64_le(), 7);
         assert_eq!(cloned.get_u16_le(), 1);
-        assert_eq!(cloned.get_u8(), 5);
 
         let mut buffer = BufferRW::from(cloned);
         assert_eq!(buffer.len(), 19);
@@ -295,7 +299,7 @@ mod tests {
         assert_eq!(rw_buf.len(), 27);
     }
 
-    /*#[test]
+    #[test]
     fn test_static() {
         static BUFFER: &[u8] = &[56, 2, 8, 46, 15, 9];
         let mut buffer = Buffer::from_static(BUFFER);
@@ -309,7 +313,7 @@ mod tests {
         let mut buffer = BufferRW::from(buffer);
         buffer.put_u64_le(5);
         assert_eq!(buffer.get_u64_le(), 5);
-    }*/
+    }
 
 }
 
