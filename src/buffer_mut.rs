@@ -18,10 +18,15 @@ const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
 #[repr(C)]
 pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true> {
     pub(crate) len: usize,
-    pub(crate) cap: usize,
-    pub(crate) offset: usize, // this is an offset into the allocation
-    pub(crate) ptr: *mut u8,
+    pub(crate) cap: usize, // FIXME: use this to border in the current region
+    pub(crate) offset: usize, // this is an offset into the allocation // FIXME: remove this and add a ptr to the metadata
+    pub(crate) ptr: *mut u8, // FIXME: move this forward when a split occurs
 }
+
+// FIXME: store base ptr and alloc_cap in the metadata in addition to the ref cnt
+
+
+// TODO: additional features: allow aligning the ref cnt ptr to the cache line size
 
 /// the MSB will never be used as allocations are capped at isize::MAX
 const INLINE_FLAG: usize = 1 << (usize::BITS - 1);
