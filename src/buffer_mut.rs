@@ -7,13 +7,16 @@ use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer, buffer_rw, GenericBuffer, WritableBuffer};
 use crate::buffer_rw::BufferRWGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 
 pub type BufferMut = BufferMutGeneric;
 
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+
+const LEN_MASK: usize = build_bit_mask(0, 5);
+const OFFSET_MASK: usize = build_bit_mask(5, 5);
 
 #[repr(C)]
 pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true> {
@@ -65,23 +68,19 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 
     #[inline]
     fn len(&self) -> usize {
-        if INLINE_SMALL {
-            self.len & !INLINE_FLAG
-        } else {
-            self.len
+        if self.is_inlined() {
+            return self.len & LEN_MASK;
         }
+        self.len
     }
 
     #[inline]
     fn clear(&mut self) {
-        if INLINE_SMALL {
-            self.len = 0 | (self.len & INLINE_FLAG);
-        } else {
-            /*if unsafe { self.is_only() } {
-                self.alloc_len = 0;
-            }*/
-            self.len = 0;
+        if self.is_inlined() {
+            self.len = 0 | (self.len & (INLINE_FLAG | OFFSET_MASK));
+            return;
         }
+        self.len = 0;
     }
 
     fn shrink(&mut self) {
@@ -108,8 +107,8 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            if INLINE_SMALL {
-                self.len = len | (self.len & INLINE_FLAG);
+            if self.is_inlined() {
+                self.len = len | (self.len & (INLINE_FLAG | OFFSET_MASK));
             } else {
                 self.len = len;
             }
@@ -139,14 +138,16 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                 #[cold]
                 #[inline(never)]
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL>, req: usize) -> *mut u8 {
-                    // remove the inline flag
-                    unsafe { (&mut *buffer).len &= !INLINE_FLAG; }
+                    let offset = unsafe { (&*buffer).len } & OFFSET_MASK;
+                    // remove the inline flag and offset data
+                    unsafe { (&mut *buffer).len &= !(INLINE_FLAG | OFFSET_MASK); }
                     let len = unsafe { (&*buffer).len };
                     let cap = find_sufficient_cap::<GROWTH_FACTOR>(INITIAL_CAP, len + req + ADDITIONAL_BUFFER_CAP);
 
                     let alloc = unsafe { realloc_buffer_counted(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
+                    unsafe { (&mut *buffer).offset = offset };
 
                     unsafe { alloc.add(len) }
                 }
@@ -186,6 +187,14 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
         let self_ptr = self as *const BufferMutGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }>;
         unsafe { self_ptr.cast::<u8>().add(size_of::<usize>()) }.cast_mut()
+    }
+
+    #[inline]
+    fn raw_offset(&self) -> usize {
+        if self.is_inlined() {
+            return self.len & OFFSET_MASK;
+        }
+        self.offset
     }
 
 }
@@ -254,7 +263,6 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     fn put_bytes(&mut self, val: &[u8]) {
         let ptr = self.ensure_large_enough(val.len());
         unsafe { ptr::copy_nonoverlapping(val as *const [u8] as *const u8, ptr, val.len()); }
-        // FIXME: does the following simply work with splitting the buffer?
         self.len += val.len();
     }
 
@@ -262,7 +270,6 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     fn put_u8(&mut self, val: u8) {
         let ptr = self.ensure_large_enough(1);
         unsafe { *ptr = val; }
-        // FIXME: does the following simply work with splitting the buffer?
         self.len += 1;
     }
 
@@ -278,6 +285,11 @@ Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
         }
         if !INLINE_SMALL && self.ptr == empty_sentinel() {
             // we don't do anything for empty buffers
+            return;
+        }
+        // fast path for single ref cnt scenarios
+        if unsafe { self.is_only() } {
+            unsafe { dealloc(self.ptr, self.cap); }
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };

@@ -249,7 +249,7 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 mod tests {
     use std::mem::size_of;
     use crate::buffer_mut::BufferMut;
-    use crate::{GenericBuffer, ReadableBuffer, test, WritableBuffer};
+    use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
     use crate::buffer::Buffer;
     use crate::buffer_rw::BufferRW;
 
@@ -298,7 +298,6 @@ mod tests {
         assert_eq!(buffer.get_u64_le(), 5);
         let rw_buf: BufferRW = buffer.into();
         assert_eq!(rw_buf.len(), 27);
-        test();
     }
 
     #[test]

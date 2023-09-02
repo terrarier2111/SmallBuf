@@ -8,13 +8,16 @@ use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer};
 use crate::buffer_mut::BufferMutGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, build_bit_mask, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted};
 
 pub type Buffer = BufferGeneric;
 
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+
+const LEN_MASK: usize = build_bit_mask(0, 5);
+const RDX_MASK: usize = build_bit_mask(5, 5);
 
 #[repr(C)]
 pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
@@ -76,6 +79,9 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
     #[inline]
     fn raw_rdx(&self) -> usize {
+        if self.is_inlined() {
+            return self.len & RDX_MASK;
+        }
         if STATIC_STORAGE {
             self.rdx & !STATIC_BUFFER_FLAG
         } else {
@@ -135,11 +141,10 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
 
     #[inline]
     fn len(&self) -> usize {
-        if INLINE_SMALL {
-            self.len & !INLINE_BUFFER_FLAG
-        } else {
-            self.len
+        if self.is_inlined() {
+            return self.len & LEN_MASK;
         }
+        self.len
     }
 
     #[inline]
@@ -177,8 +182,9 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
+            // FIXME: do we need to adjust rdx?
             if INLINE_SMALL {
-                self.len = len | (self.len & INLINE_BUFFER_FLAG);
+                self.len = len | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
             } else {
                 self.len = len;
             }
@@ -301,6 +307,11 @@ Drop for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>
         }
         if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
             // we don't do anything for empty buffers
+            return;
+        }
+        // fast path for single ref cnt scenarios
+        if unsafe { self.is_only() } {
+            unsafe { dealloc(self.ptr, self.cap); }
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };

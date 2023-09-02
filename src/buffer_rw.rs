@@ -5,7 +5,7 @@ use std::{mem, ptr};
 use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 use crate::{buffer, buffer_mut, GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
 use crate::buffer::BufferGeneric;
 use crate::buffer_mut::BufferMutGeneric;
@@ -15,6 +15,9 @@ pub type BufferRW = BufferRWGeneric;
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+
+const LEN_MASK: usize = build_bit_mask(0, 5);
+const RDX_MASK: usize = build_bit_mask(5, 5);
 
 #[repr(C)]
 pub struct BufferRWGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
@@ -68,18 +71,20 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
                 #[cold]
                 #[inline(never)]
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>, req: usize) -> *mut u8 {
-                    // remove the inline flag
-                    unsafe { (&mut *buffer).len &= !INLINE_BUFFER_FLAG; }
-                    let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
+                    let rdx = unsafe { (&*buffer).len } & RDX_MASK;
+                    // remove the inline flag and rdx data
+                    unsafe { (&mut *buffer).len &= !(INLINE_BUFFER_FLAG | RDX_MASK); }
                     let len = unsafe { (&*buffer).len };
+                    let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, len + req + ADDITIONAL_BUFFER_CAP);
                     let alloc = unsafe { realloc_buffer_counted(buffer.cast::<u8>().add(size_of::<usize>()), len, cap) };
 
                     unsafe { (&mut *buffer).cap = cap };
                     unsafe { (&mut *buffer).ptr = alloc };
+                    unsafe { (&mut *buffer).rdx = rdx };
                     unsafe { alloc.add(len) }
                 }
                 // handle outlining buffer
-                return outline_buffer(self_ptr, self.len() + req);
+                return outline_buffer(self_ptr, req);
             }
             return unsafe { self_ptr.cast::<u8>().add(usize::BITS as usize / 8 + self.len()) };
         }
@@ -98,14 +103,15 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
             #[cold]
             fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>, req: usize) {
                 let old_cap = unsafe { (&*buffer).cap };
-                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, req + ADDITIONAL_BUFFER_CAP);
-                let new_alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, (&*buffer).len, old_cap, new_cap) };
+                let len = unsafe { (&*buffer).len };
+                let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, len + req + ADDITIONAL_BUFFER_CAP);
+                let new_alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).ptr, len, old_cap, new_cap) };
                 unsafe { (&mut *buffer).ptr = new_alloc; }
                 unsafe { (&mut *buffer).cap = new_cap; }
                 // set ref cnt
                 unsafe { *(&*buffer).meta_ptr().cast::<usize>() = 1; }
             }
-            resize_alloc(self_ptr, self.len() + req);
+            resize_alloc(self_ptr, req);
         }
         unsafe { self.ptr.add(self.len) }
     }
@@ -140,6 +146,14 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
         let ptr = self as *const BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
         unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
+    }
+
+    #[inline]
+    fn raw_rdx(&self) -> usize {
+        if self.is_inlined() {
+            return self.len & RDX_MASK;
+        }
+        self.rdx
     }
 
 }
@@ -361,6 +375,11 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
         }
         if !INLINE_SMALL && !STATIC_STORAGE && self.ptr == empty_sentinel() {
             // we don't do anything for empty buffers
+            return;
+        }
+        // fast path for single ref cnt scenarios
+        if unsafe { self.is_only() } {
+            unsafe { dealloc(self.ptr, self.cap); }
             return;
         }
         let meta_ptr = unsafe { self.meta_ptr() };
