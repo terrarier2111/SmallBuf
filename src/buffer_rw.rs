@@ -90,12 +90,13 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         }
         // move the static buffer into a dynamic heap buffer
         if self.is_static() {
-            let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, req + ADDITIONAL_BUFFER_CAP);
+            let cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(INITIAL_CAP, self.len + req + ADDITIONAL_BUFFER_CAP);
             let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, cap) };
             self.ptr = alloc;
             self.cap = cap;
             // mark the buffer as non static
             self.rdx &= !STATIC_BUFFER_FLAG;
+            return unsafe { self.ptr.add(self.len) };
         }
         // handle buffer reallocation
         if self.cap < self.len + req + ADDITIONAL_BUFFER_CAP {
@@ -145,7 +146,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
         let ptr = self as *const BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
-        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
+        unsafe { ptr.cast::<u8>().add(size_of::<usize>()) }.cast_mut()
     }
 
     #[inline]
@@ -153,7 +154,11 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         if self.is_inlined() {
             return self.len & RDX_MASK;
         }
-        self.rdx
+        if STATIC_STORAGE {
+            self.rdx & !STATIC_BUFFER_FLAG
+        } else {
+            self.rdx
+        }
     }
 
 }
@@ -185,21 +190,20 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
 
     #[inline]
     fn len(&self) -> usize {
-        if INLINE_SMALL {
-            self.len & !INLINE_BUFFER_FLAG
-        } else {
-            self.len
+        if self.is_inlined() {
+            return self.len & LEN_MASK;
         }
+        self.len
     }
 
     #[inline]
     fn clear(&mut self) {
-        if INLINE_SMALL {
-            self.len = 0 | (self.len & INLINE_BUFFER_FLAG);
+        if self.is_inlined() {
+            self.len = 0 | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
         } else {
             self.len = 0;
         }
-        self.rdx = 0;
+        // FIXME: should we modify rdx? as it will be larger than len after this.
     }
 
     fn shrink(&mut self) {
@@ -230,11 +234,12 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            if INLINE_SMALL {
-                self.len = len | (self.len & INLINE_BUFFER_FLAG);
+            if self.is_inlined() {
+                self.len = len | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
             } else {
                 self.len = len;
             }
+            // FIXME: should we modify rdx? as it will be larger than len after this.
         }
     }
 }

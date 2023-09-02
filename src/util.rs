@@ -67,10 +67,10 @@ pub(crate) fn align_unaligned_len_to<const ALIGNMENT: usize>(ptr: *mut u8, len: 
 
 #[inline]
 pub(crate) unsafe fn align_unaligned_ptr_to<const ALIGNMENT: usize, const REGION_SIZE: usize>(ptr: *mut u8, len: usize) -> *mut u8 {
-    let end = unsafe { ptr.add(len) };
-    let additional = end as usize % ALIGNMENT;
-    let end = end.sub(additional + REGION_SIZE);
-    end
+    let end = ptr as usize + len;
+    let additional = end % ALIGNMENT;
+    let region_start = ptr.add(len - (additional + REGION_SIZE));
+    region_start
 }
 
 #[inline]

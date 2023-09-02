@@ -31,7 +31,7 @@ pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usiz
 const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
 /// the MSB will never be used as allocations are capped at isize::MAX
 const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
-pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferGeneric<0, 0, false, false>>() - size_of::<usize>() * 2; // FIXME: we can make this one usize bigger y inlining rdx into len for inlined buffers
+pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferGeneric<0, 0, false, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer_mut::BASE_INLINE_SIZE), buffer_rw::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
 /// to align said values properly.
@@ -109,7 +109,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
         let ptr = self as *const BufferGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
-        unsafe { ptr.cast::<u8>().add(size_of::<usize>() * 2) }.cast_mut()
+        unsafe { ptr.cast::<u8>().add(size_of::<usize>()) }.cast_mut()
     }
 
 }

@@ -1,5 +1,3 @@
-#![feature(generic_const_exprs)]
-
 use std::borrow::Borrow;
 use std::mem::size_of;
 use std::ops::{Deref, RangeBounds};
@@ -258,12 +256,12 @@ mod tests {
         let mut buffer = BufferMut::new();
         buffer.put_u8(2);
         buffer.put_u64_le(8);
-        assert_eq!(buffer.capacity(), size_of::<usize>() * 2);
+        assert_eq!(buffer.capacity(), size_of::<usize>() * 3);
         assert_eq!(buffer.len(), 9);
         buffer.put_u64_le(7);
-        println!("meta ptr: {}", unsafe { buffer.meta_ptr() } as usize);
         buffer.put_u16_le(1);
-        assert_eq!(buffer.len(), 19);
+        buffer.put_u64_le(45);
+        assert_eq!(buffer.len(), 27);
         assert!(!buffer.is_inlined());
         println!("meta ptr: {}", unsafe { buffer.meta_ptr() } as usize);
         if unsafe { buffer.is_only() } {
@@ -291,13 +289,17 @@ mod tests {
         assert_eq!(cloned.get_u64_le(), 8);
         assert_eq!(cloned.get_u64_le(), 7);
         assert_eq!(cloned.get_u16_le(), 1);
+        assert_eq!(cloned.get_u64_le(), 45);
 
         let mut buffer = BufferRW::from(cloned);
-        assert_eq!(buffer.len(), 19);
+        assert_eq!(buffer.len(), 27);
         buffer.put_u64_le(5);
         assert_eq!(buffer.get_u64_le(), 5);
-        let rw_buf: BufferRW = buffer.into();
-        assert_eq!(rw_buf.len(), 27);
+        let mut rw_buf: BufferRW = buffer.into();
+        assert_eq!(rw_buf.len(), 35);
+        rw_buf.put_u64_le(3);
+        rw_buf.shrink();
+        assert_eq!(rw_buf.get_u64_le(), 3);
     }
 
     #[test]
