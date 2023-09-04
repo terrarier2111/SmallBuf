@@ -7,8 +7,6 @@ pub mod buffer_rw;
 pub mod buffer_mut;
 mod util;
 
-// FIXME: restructure the mut buffers to store their capacity in their allocations such that we can subslice them
-
 pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8]> + Into<Vec<u8>> + From<Vec<u8>> {
 
     /// creates a new empty instance of a buffer

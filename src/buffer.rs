@@ -80,7 +80,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn raw_rdx(&self) -> usize {
         if self.is_inlined() {
-            return self.len & RDX_MASK;
+            return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
         }
         if STATIC_STORAGE {
             self.rdx & !STATIC_BUFFER_FLAG

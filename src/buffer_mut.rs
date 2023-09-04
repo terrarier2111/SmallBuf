@@ -138,7 +138,7 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
                 #[cold]
                 #[inline(never)]
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>(buffer: *mut BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL>, req: usize) -> *mut u8 {
-                    let offset = unsafe { (&*buffer).len } & OFFSET_MASK;
+                    let offset = (unsafe { (&*buffer).len } & OFFSET_MASK) >> LEN_MASK.count_ones();
                     // remove the inline flag and offset data
                     unsafe { (&mut *buffer).len &= !(INLINE_FLAG | OFFSET_MASK); }
                     let len = unsafe { (&*buffer).len };
@@ -192,7 +192,7 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn raw_offset(&self) -> usize {
         if self.is_inlined() {
-            return self.len & OFFSET_MASK;
+            return (self.len & OFFSET_MASK) >> LEN_MASK.count_ones();
         }
         self.offset
     }

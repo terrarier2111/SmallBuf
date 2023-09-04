@@ -71,7 +71,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
                 #[cold]
                 #[inline(never)]
                 fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>, req: usize) -> *mut u8 {
-                    let rdx = unsafe { (&*buffer).len } & RDX_MASK;
+                    let rdx = (unsafe { (&*buffer).len } & RDX_MASK) >> LEN_MASK.count_ones();
                     // remove the inline flag and rdx data
                     unsafe { (&mut *buffer).len &= !(INLINE_BUFFER_FLAG | RDX_MASK); }
                     let len = unsafe { (&*buffer).len };
@@ -152,7 +152,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn raw_rdx(&self) -> usize {
         if self.is_inlined() {
-            return self.len & RDX_MASK;
+            return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
         }
         if STATIC_STORAGE {
             self.rdx & !STATIC_BUFFER_FLAG
