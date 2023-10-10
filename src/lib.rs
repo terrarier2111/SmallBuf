@@ -1,5 +1,4 @@
 use std::borrow::Borrow;
-use std::mem::size_of;
 use std::ops::{Deref, RangeBounds};
 
 pub mod buffer;

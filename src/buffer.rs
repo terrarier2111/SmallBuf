@@ -258,6 +258,30 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
             return;
         }
 
+        if self.is_static() {
+            if !other.is_static() {
+                panic!("Static buffers can only be merged with other static buffers");
+            }
+            if self.ptr != other.ptr {
+                panic!("Static buffers have to have the same src in order to be mergable");
+            }
+            if self.raw_rdx() + self.len() != other.raw_rdx() && self.len() != other.raw_rdx() + other.len() {
+                panic!("Unsplitting only works on buffers that are next to each other");
+            }
+            // set rdx to min(self.rdx(), other.rdx())
+            // set len to self.len() + other.len()
+        }
+
+        if self.is_inlined() {
+            if !other.is_inlined() {
+                panic!("Inlined buffers can only be merged with other inlined buffers");
+            }
+            if self.raw_rdx() + self.len() != other.raw_rdx() && self.len() != other.raw_rdx() + other.len() {
+                panic!("Unsplitting only works on buffers that are next to each other");
+            }
+
+        }
+
         todo!()
     }
 
