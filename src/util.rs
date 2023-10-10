@@ -5,7 +5,7 @@ use std::mem::{align_of, size_of, transmute};
 pub(crate) fn alloc_zeroed_buffer(len: usize) -> *mut u8 {
     let alloc = unsafe { alloc_zeroed(Layout::array::<u8>(len).unwrap()) };
     if alloc.is_null() {
-        panic!("allocation failure");
+        alloc_failure();
     }
     alloc
 }
@@ -13,9 +13,13 @@ pub(crate) fn alloc_zeroed_buffer(len: usize) -> *mut u8 {
 pub(crate) unsafe fn alloc_uninit_buffer(len: usize) -> *mut u8 {
     let alloc = unsafe { alloc(Layout::array::<u8>(len).unwrap()) };
     if alloc.is_null() {
-        panic!("allocation failure");
+        alloc_failure();
     }
     alloc
+}
+
+fn alloc_failure() {
+    panic!("allocation failure");
 }
 
 #[inline]
