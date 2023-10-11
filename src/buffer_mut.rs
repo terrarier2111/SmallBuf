@@ -13,7 +13,7 @@ pub type BufferMut = BufferMutGeneric;
 
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
-const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
 const LEN_MASK: usize = build_bit_mask(0, 5);
 const OFFSET_MASK: usize = build_bit_mask(5, 5);

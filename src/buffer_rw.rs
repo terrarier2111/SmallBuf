@@ -14,7 +14,7 @@ pub type BufferRW = BufferRWGeneric;
 
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
-const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
 const LEN_MASK: usize = build_bit_mask(0, 5);
 const RDX_MASK: usize = build_bit_mask(5, 5);
@@ -150,7 +150,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     }
 
     #[inline]
-    fn raw_rdx(&self) -> usize {
+    fn get_rdx(&self) -> usize {
         if self.is_inlined() {
             return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
         }
@@ -159,6 +159,30 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         } else {
             self.rdx
         }
+    }
+
+    #[inline]
+    fn set_rdx(&mut self, rdx: usize) {
+        if self.is_inlined() {
+            self.len = (self.len & !RDX_MASK) | (rdx << LEN_MASK.count_ones());
+            return;
+        }
+        let flags = if STATIC_STORAGE {
+            self.rdx & STATIC_BUFFER_FLAG
+        } else {
+            0
+        };
+        self.rdx = rdx | flags;
+    }
+
+    #[inline]
+    fn set_len(&mut self, len: usize) {
+        let flags = if INLINE_SMALL {
+            self.len & (INLINE_BUFFER_FLAG | RDX_MASK)
+        } else {
+            0
+        };
+        self.len = len | flags;
     }
 
 }
@@ -332,20 +356,78 @@ ReadableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
         self.len() - rdx
     }
 
-    fn split_off(&mut self, at: usize) -> Self {
-        todo!()
+    #[inline]
+    fn split_off(&mut self, offset: usize) -> Self {
+        let idx = self.get_rdx() + offset;
+        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let mut other = self.clone();
+
+        self.set_len(idx);
+        other.set_rdx(idx);
+
+        other
     }
 
     fn split_to(&mut self, offset: usize) -> Self {
-        todo!()
+        let idx = self.get_rdx() + offset;
+        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let mut other = self.clone();
+
+        other.set_len(idx);
+        self.set_rdx(idx);
+
+        other
     }
 
     fn split(&mut self) -> Self {
-        todo!()
+        // TODO: check if the panic check gets removed
+        self.split_off(0)
     }
 
     fn unsplit(&mut self, other: Self) {
-        todo!()
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+
+        if self.is_static() {
+            if !other.is_static() {
+                panic!("Static buffers can only be merged with other static buffers");
+            }
+            if self.ptr != other.ptr {
+                panic!("Unsplitting only works on buffers that have the same src");
+            }
+            if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
+                panic!("Unsplitting only works on buffers that are next to each other");
+            }
+            self.set_rdx(self.get_rdx().min(other.get_rdx()));
+            self.set_len(self.len() + other.len());
+            return;
+        }
+
+        if self.is_inlined() {
+            if !other.is_inlined() {
+                panic!("Inlined buffers can only be merged with other inlined buffers");
+            }
+            if self.remaining() + other.remaining() > INLINE_SIZE {
+                panic!("Unsplitting inlined buffers only works if they are small enough");
+            }
+            if self.get_rdx() + self.len() != other.get_rdx() && self.get_rdx() != other.get_rdx() + other.len() {
+                panic!("Unsplitting only works on buffers that are next to each other");
+            }
+            self.set_rdx(self.get_rdx().min(other.get_rdx()));
+            self.set_len(self.len().max(other.len()));
+            return;
+        }
+
+        if self.ptr != other.ptr {
+            panic!("Unsplitting only works on buffers that have the same src");
+        }
+        if self.get_rdx() + self.len() != other.get_rdx() && self.get_rdx() != other.get_rdx() + other.len() {
+            panic!("Unsplitting only works on buffers that are next to each other");
+        }
+        self.set_rdx(self.get_rdx().min(other.get_rdx()));
+        self.set_len(self.len().max(other.len()));
     }
 
     #[inline]

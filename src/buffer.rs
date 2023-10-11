@@ -3,7 +3,6 @@ use std::ops::{Deref, RangeBounds};
 use std::process::abort;
 use std::{mem, ptr};
 use std::borrow::Borrow;
-use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer};
@@ -14,7 +13,7 @@ pub type Buffer = BufferGeneric;
 
 // TODO: once const_generic_expressions are supported calculate INITIAL_CAP the following:
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
-const INITIAL_CAP_DEFAULT: usize = 2 * INLINE_SIZE;
+const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
 const LEN_MASK: usize = build_bit_mask(0, 5);
 const RDX_MASK: usize = build_bit_mask(5, 5);
@@ -78,7 +77,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     }
 
     #[inline]
-    fn get_rdx(&self) -> usize {
+    pub(crate) fn get_rdx(&self) -> usize {
         if self.is_inlined() {
             return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
         }
@@ -91,6 +90,10 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
     #[inline]
     fn set_rdx(&mut self, rdx: usize) {
+        if self.is_inlined() {
+            self.len = (self.len & !RDX_MASK) | (rdx << LEN_MASK.count_ones());
+            return;
+        }
         let flags = if STATIC_STORAGE {
             self.rdx & STATIC_BUFFER_FLAG
         } else {
@@ -271,25 +274,25 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
             if !other.is_inlined() {
                 panic!("Inlined buffers can only be merged with other inlined buffers");
             }
-            if self.len() + other.len() > INLINE_SIZE {
+            if self.remaining() + other.remaining() > INLINE_SIZE {
                 panic!("Unsplitting inlined buffers only works if they are small enough");
             }
-            if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
+            if self.get_rdx() + self.len() != other.get_rdx() && self.get_rdx() != other.get_rdx() + other.len() {
                 panic!("Unsplitting only works on buffers that are next to each other");
             }
             self.set_rdx(self.get_rdx().min(other.get_rdx()));
-            self.set_len(self.len() + other.len());
+            self.set_len(self.len().max(other.len()));
             return;
         }
 
         if self.ptr != other.ptr {
             panic!("Unsplitting only works on buffers that have the same src");
         }
-        if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
+        if self.get_rdx() + self.len() != other.get_rdx() && self.get_rdx() != other.get_rdx() + other.len() {
             panic!("Unsplitting only works on buffers that are next to each other");
         }
         self.set_rdx(self.get_rdx().min(other.get_rdx()));
-        self.set_len(self.len() + other.len());
+        self.set_len(self.len().max(other.len()));
     }
 
     #[inline]

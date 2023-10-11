@@ -317,4 +317,19 @@ mod tests {
         // buf_mut.put_u8(3);
     }
 
+    #[test]
+    fn test_split() {
+        let mut buffer = BufferMut::new();
+        buffer.put_u64_le(3);
+        buffer.put_u128_be(52);
+        let original_len = buffer.len();
+        let mut buffer = Buffer::from(buffer);
+        let mut other = buffer.split_off(9);
+        println!("other: len {} rdx {}", other.len(), other.get_rdx());
+        println!("buffer: len {} rdx {}", buffer.len(), buffer.get_rdx());
+        assert_eq!(other.remaining() + buffer.remaining(), original_len);
+        other.unsplit(buffer);
+        assert_eq!(other.remaining(), original_len);
+    }
+
 }
