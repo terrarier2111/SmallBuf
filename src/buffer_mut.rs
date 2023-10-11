@@ -314,7 +314,6 @@ Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             };
         }
 
-        // panic!("len: {} cap: {}", self.len, self.cap);
         let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
         Self {
             len: self.len,

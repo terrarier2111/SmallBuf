@@ -205,8 +205,9 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            // FIXME: do we need to adjust rdx?
             self.set_len(len);
+            // fixup rdx after updating len in order to avoid the rdx getting OOB
+            self.set_rdx(self.get_rdx().min(len));
         }
     }
 }

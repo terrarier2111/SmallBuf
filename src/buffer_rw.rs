@@ -222,12 +222,8 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
 
     #[inline]
     fn clear(&mut self) {
-        if self.is_inlined() {
-            self.len = 0 | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
-        } else {
-            self.len = 0;
-        }
-        // FIXME: should we modify rdx? as it will be larger than len after this.
+        self.len &= !INLINE_BUFFER_FLAG;
+        self.rdx = 0;
     }
 
     fn shrink(&mut self) {
@@ -258,12 +254,9 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            if self.is_inlined() {
-                self.len = len | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
-            } else {
-                self.len = len;
-            }
-            // FIXME: should we modify rdx? as it will be larger than len after this.
+            self.set_len(len);
+            // fixup rdx after updating len in order to avoid the rdx getting OOB
+            self.set_rdx(self.get_rdx().min(len));
         }
     }
 }
@@ -471,7 +464,7 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
         }
         let meta_ptr = unsafe { self.meta_ptr() };
         let ref_cnt = unsafe { &*meta_ptr.cast::<AtomicUsize>() };
-        let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // FIXME: can we choose a weaker ordering?
+        let remaining = ref_cnt.fetch_sub(1, Ordering::AcqRel) - 1; // TODO: can we choose a weaker ordering?
         if remaining == 0 {
             unsafe { dealloc(self.ptr, self.cap); }
         }
@@ -491,7 +484,8 @@ Clone for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORA
             };
         }
 
-        // TODO: just increment ref cnt instead of allocating new buffer
+        // we can't just increment reference count as that would allow for
+        // multiple mutable references to the same memory location
 
         let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
 
@@ -511,7 +505,7 @@ AsRef<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         let ptr = if self.is_inlined() {
             unsafe { self.inlined_buffer_ptr() }
         } else {
-            unsafe { self.ptr }
+            self.ptr
         };
         let ptr = unsafe { ptr.add(self.rdx) };
         unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
@@ -575,7 +569,7 @@ Into<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
             mem::forget(self);
             return ret;
         }
-        // FIXME: should we try to shrink?
+        // TODO: should we try to shrink?
         let buf = unsafe { realloc_buffer(self.ptr, self.len, self.cap) };
         unsafe { Vec::from_raw_parts(buf, self.len, self.cap) }
     }
@@ -671,7 +665,7 @@ Into<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for Bu
             return ret;
         }
 
-        // FIXME: should we try to shrink?
+        // TODO: should we try to shrink?
         let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
         BufferGeneric {
             len: self.len,
