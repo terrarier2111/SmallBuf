@@ -69,7 +69,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         if remaining < bytes {
             panic!("not enough bytes in buffer, expected {} readable bytes but only {} bytes are left", bytes, remaining);
         }
-        let rdx = self.raw_rdx();
+        let rdx = self.get_rdx();
         if self.is_inlined() {
             unsafe { self.inlined_buffer_ptr().add(rdx) }
         } else {
@@ -78,7 +78,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     }
 
     #[inline]
-    fn raw_rdx(&self) -> usize {
+    fn get_rdx(&self) -> usize {
         if self.is_inlined() {
             return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
         }
@@ -87,6 +87,26 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         } else {
             self.rdx
         }
+    }
+
+    #[inline]
+    fn set_rdx(&mut self, rdx: usize) {
+        let flags = if STATIC_STORAGE {
+            self.rdx & STATIC_BUFFER_FLAG
+        } else {
+            0
+        };
+        self.rdx = rdx | flags;
+    }
+
+    #[inline]
+    fn set_len(&mut self, len: usize) {
+        let flags = if INLINE_SMALL {
+            self.len & (INLINE_BUFFER_FLAG | RDX_MASK)
+        } else {
+            0
+        };
+        self.len = len | flags;
     }
 
     #[inline]
@@ -183,11 +203,7 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
             // FIXME: do we need to adjust rdx?
-            if INLINE_SMALL {
-                self.len = len | (self.len & (INLINE_BUFFER_FLAG | RDX_MASK));
-            } else {
-                self.len = len;
-            }
+            self.set_len(len);
         }
     }
 }
@@ -197,51 +213,29 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
 
     #[inline]
     fn remaining(&self) -> usize {
-        self.len() - self.raw_rdx()
+        self.len() - self.get_rdx()
     }
 
     #[inline]
     fn split_off(&mut self, offset: usize) -> Self {
-        let idx = self.raw_rdx() + offset;
+        let idx = self.get_rdx() + offset;
         assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
         let mut other = self.clone();
 
-        let len_flag = if INLINE_SMALL {
-            self.len & INLINE_BUFFER_FLAG
-        } else {
-            0
-        };
-        let rdx_flag = if STATIC_STORAGE {
-            self.rdx & STATIC_BUFFER_FLAG
-        } else {
-            0
-        };
-
-        self.len = idx | len_flag;
-        other.rdx = idx | rdx_flag;
+        self.set_len(idx);
+        other.set_rdx(idx);
 
         other
     }
 
     #[inline]
     fn split_to(&mut self, offset: usize) -> Self {
-        let idx = self.raw_rdx() + offset;
+        let idx = self.get_rdx() + offset;
         assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
         let mut other = self.clone();
 
-        let rdx_flag = if STATIC_STORAGE {
-            self.rdx & STATIC_BUFFER_FLAG
-        } else {
-            0
-        };
-        let len_flag = if INLINE_SMALL {
-            self.len & INLINE_BUFFER_FLAG
-        } else {
-            0
-        };
-
-        self.rdx = idx | rdx_flag;
-        other.len = idx | len_flag;
+        other.set_len(idx);
+        self.set_rdx(idx);
 
         other
     }
@@ -263,26 +257,39 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
                 panic!("Static buffers can only be merged with other static buffers");
             }
             if self.ptr != other.ptr {
-                panic!("Static buffers have to have the same src in order to be mergable");
+                panic!("Unsplitting only works on buffers that have the same src");
             }
-            if self.raw_rdx() + self.len() != other.raw_rdx() && self.len() != other.raw_rdx() + other.len() {
+            if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
                 panic!("Unsplitting only works on buffers that are next to each other");
             }
-            // set rdx to min(self.rdx(), other.rdx())
-            // set len to self.len() + other.len()
+            self.set_rdx(self.get_rdx().min(other.get_rdx()));
+            self.set_len(self.len() + other.len());
+            return;
         }
 
         if self.is_inlined() {
             if !other.is_inlined() {
                 panic!("Inlined buffers can only be merged with other inlined buffers");
             }
-            if self.raw_rdx() + self.len() != other.raw_rdx() && self.len() != other.raw_rdx() + other.len() {
+            if self.len() + other.len() > INLINE_SIZE {
+                panic!("Unsplitting inlined buffers only works if they are small enough");
+            }
+            if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
                 panic!("Unsplitting only works on buffers that are next to each other");
             }
-
+            self.set_rdx(self.get_rdx().min(other.get_rdx()));
+            self.set_len(self.len() + other.len());
+            return;
         }
 
-        todo!()
+        if self.ptr != other.ptr {
+            panic!("Unsplitting only works on buffers that have the same src");
+        }
+        if self.get_rdx() + self.len() != other.get_rdx() && self.len() != other.get_rdx() + other.len() {
+            panic!("Unsplitting only works on buffers that are next to each other");
+        }
+        self.set_rdx(self.get_rdx().min(other.get_rdx()));
+        self.set_len(self.len() + other.len());
     }
 
     #[inline]
@@ -375,7 +382,7 @@ AsRef<[u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_S
         } else {
             self.ptr
         };
-        let rdx = self.raw_rdx();
+        let rdx = self.get_rdx();
         let ptr = unsafe { ptr.add(rdx) };
         unsafe { &*slice_from_raw_parts(ptr, self.remaining()) }
     }
