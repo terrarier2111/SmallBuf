@@ -21,10 +21,12 @@ const OFFSET_MASK: usize = build_bit_mask(5, 5);
 #[repr(C)]
 pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true> {
     pub(crate) len: usize,
-    pub(crate) cap: usize, // FIXME: use this to border in the current region
-    pub(crate) offset: usize, // this is an offset into the allocation // FIXME: remove this and add a ptr to the metadata
-    pub(crate) ptr: *mut u8, // FIXME: move this forward when a split occurs
+    pub(crate) wrx: usize, // this indicates the write index
+    pub(crate) offset: usize, // this is an offset into the allocation
+    pub(crate) ptr: *mut u8, // this points to the end of the allocation minus allocation size (in order to use this, one has to mask off the lower bits)
 }
+
+// FIXME: only allow cap to be a multiple of meta_align in order to be able to use the lower bits to store the additional size that was masked off to align the metadata properly
 
 // FIXME: store base ptr and alloc_cap in the metadata in addition to the ref cnt
 
@@ -56,7 +58,7 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
             } else {
                 0
             },
-            cap: 0,
+            wrx: 0,
             ptr: if INLINE_SMALL {
                 null_mut()
             } else {

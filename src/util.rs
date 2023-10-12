@@ -95,7 +95,7 @@ pub(crate) unsafe fn realloc_buffer_counted(buf: *mut u8, len: usize, new_cap: u
 /// this additional storage is used to store the reference counter and
 /// capacity and to align said values properly.
 const ADDITIONAL_SIZE: usize = METADATA_SIZE + align_of::<usize>() - 1;
-const METADATA_SIZE: usize = size_of::<usize>() * 1;
+const METADATA_SIZE: usize = size_of::<usize>() * 2;
 
 #[inline]
 pub(crate) unsafe fn realloc_buffer(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
