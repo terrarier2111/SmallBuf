@@ -5,9 +5,9 @@ use std::{mem, ptr};
 use std::borrow::Borrow;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer};
+use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer, WritableBuffer};
 use crate::buffer_mut::BufferMutGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, build_bit_mask, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, build_bit_mask, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted, round_up_pow_2};
 
 pub type Buffer = BufferGeneric;
 
@@ -15,12 +15,14 @@ pub type Buffer = BufferGeneric;
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
-const LEN_MASK: usize = build_bit_mask(0, 5);
-const RDX_MASK: usize = build_bit_mask(5, 5);
+const INLINE_SIZE_BITS: usize = round_up_pow_2(INLINE_SIZE).trailing_zeros() as usize;
+const LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
+const RDX_MASK: usize = build_bit_mask(INLINE_SIZE_BITS, INLINE_SIZE_BITS);
+const OFFSET_MASK: usize = build_bit_mask(INLINE_SIZE_BITS * 2, INLINE_SIZE_BITS);
 
 #[repr(C)]
 pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
-    pub(crate) len: usize, // the last bit indicates whether the allocation is in-line
+    pub(crate) len: usize, // the last 2 bits indicate the type of allocation at hand
     pub(crate) buffer: BufferUnion,
 }
 
@@ -31,7 +33,7 @@ union BufferUnion {
 }
 
 const CAP_OFFSET_MASK: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, CAP_LEN_BITS);
-const CAP_LEN_BITS: usize = (usize::BITS - usize::BITS.trailing_zeros()) as usize;
+const CAP_LEN_BITS: usize = usize::BITS.trailing_zeros() as usize;
 const CAP_MASK_LOWER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1 + CAP_LEN_BITS, usize::BITS as usize / 4 * 1 - 1 - CAP_LEN_BITS) as usize;
 const CAP_MASK_UPPER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, usize::BITS as usize / 4 * 1 - 1) as usize;
 const CAP_SHIFT_LOWER: usize = usize::BITS as usize - usize::BITS as usize / 4 * 1 + CAP_LEN_BITS;
@@ -47,9 +49,9 @@ struct ReferenceBuffer {
 impl ReferenceBuffer {
 
     #[inline]
-    fn new(cap: usize, offset: usize, rdx: usize, ptr: *mut u8, static_buffer_flag: usize) -> Self {
+    fn new(cap: usize, offset: usize, rdx: usize, ptr: *mut u8) -> Self {
         Self {
-            rdx: rdx | ((cap & (CAP_MASK_LOWER >> CAP_SHIFT_LOWER)) << CAP_SHIFT_UPPER) | static_buffer_flag,
+            rdx: rdx | ((cap & (CAP_MASK_LOWER >> CAP_SHIFT_LOWER)) << CAP_SHIFT_UPPER),
             offset: offset | (cap & (CAP_MASK_UPPER >> CAP_MASK_UPPER) << CAP_SHIFT_UPPER),
             ptr,
         }
@@ -62,7 +64,13 @@ impl ReferenceBuffer {
 
     #[inline]
     fn rdx(&self) -> usize {
-        self.rdx & !(CAP_MASK_LOWER | CAP_OFFSET_MASK | STATIC_BUFFER_FLAG)
+        self.rdx & !(CAP_MASK_LOWER | CAP_OFFSET_MASK)
+    }
+
+    #[inline]
+    fn set_rdx(&mut self, rdx: usize) {
+        self.rdx &= CAP_MASK_LOWER | CAP_OFFSET_MASK;
+        self.rdx |= rdx;
     }
 
     #[inline]
@@ -70,12 +78,59 @@ impl ReferenceBuffer {
         self.offset & !CAP_MASK_UPPER
     }
 
+    #[inline]
+    fn set_offset(&mut self, offset: usize) {
+        self.offset &= CAP_MASK_UPPER;
+        self.offset |= offset;
+    }
+
 }
 
-/// the MSB will never be used as allocations are capped at isize::MAX
 const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
-/// the MSB will never be used as allocations are capped at isize::MAX
-const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
+const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 2);
+
+/// the last 2 bits will never be used as allocations are capped at usize::MAX / 4 * 3
+const BUFFER_TY_MASK: usize = build_bit_mask(usize::BITS as usize - 2, 2);
+
+#[derive(Clone, Copy)]
+struct BufferTy(usize);
+
+impl BufferTy {
+
+    #[inline]
+    pub const fn new_inlined() -> Self {
+        Self(INLINE_BUFFER_FLAG)
+    }
+
+    #[inline]
+    pub const fn new_static() -> Self {
+        Self(STATIC_BUFFER_FLAG)
+    }
+
+    #[inline]
+    pub const fn new_heap() -> Self {
+        Self(0)
+    }
+
+    #[inline]
+    const fn is_static(self) -> bool {
+        self.0 & STATIC_BUFFER_FLAG != 0
+    }
+
+    #[inline]
+    const fn is_inlined(self) -> bool {
+        self.0 & INLINE_BUFFER_FLAG != 0
+    }
+
+    #[inline]
+    const fn is_heap(self) -> bool {
+        self.0 == 0
+    }
+
+}
+
+// FIXME: move both flags inside `len` and move CAP_MASK from len into rdx
+
 pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferGeneric<0, 0, false, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer_mut::BASE_INLINE_SIZE), buffer_rw::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
@@ -92,13 +147,18 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
     #[inline]
+    fn ty(&self) -> BufferTy {
+        BufferTy(self.len & BUFFER_TY_MASK)
+    }
+
+    #[inline]
     pub(crate) fn is_static(&self) -> bool {
-        STATIC_STORAGE && self.buffer.reference.rdx & STATIC_BUFFER_FLAG != 0
+        STATIC_STORAGE && self.ty().is_static()
     }
 
     #[inline]
     pub(crate) fn is_inlined(&self) -> bool {
-        INLINE_SMALL && self.len & INLINE_BUFFER_FLAG != 0
+        INLINE_SMALL && self.ty().is_inlined()
     }
 
     /// SAFETY: this is only safe to call if the buffer isn't inlined and isn't static.
@@ -115,23 +175,37 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
             panic!("not enough bytes in buffer, expected {} readable bytes but only {} bytes are left", bytes, remaining);
         }
         let rdx = self.get_rdx();
+        let offset = self.get_offset();
         if self.is_inlined() {
-            unsafe { self.inlined_buffer_ptr().add(rdx) }
+            unsafe { self.inlined_buffer_ptr().add(offset + rdx) }
         } else {
-            unsafe { self.buffer.reference.ptr.add(rdx) }
+            unsafe { self.buffer.reference.ptr.add(offset + rdx) }
         }
+    }
+
+    #[inline]
+    pub(crate) fn get_offset(&self) -> usize {
+        if self.is_inlined() {
+            return (self.len & OFFSET_MASK) >> OFFSET_MASK.leading_zeros();
+        }
+        self.buffer.reference.offset & !CAP_MASK_UPPER
+    }
+
+    #[inline]
+    pub(crate) fn set_offset(&self, offset: usize) {
+        if self.is_inlined() {
+            self.len = offset | (self.len & (LEN_MASK | RDX_MASK | BUFFER_TY_MASK));
+            return;
+        }
+        self.buffer.reference.set_offset(offset);
     }
 
     #[inline]
     pub(crate) fn get_rdx(&self) -> usize {
         if self.is_inlined() {
-            return (self.len & RDX_MASK) >> LEN_MASK.count_ones();
+            return (self.len & RDX_MASK) >> LEN_MASK.leading_zeros();
         }
-        if STATIC_STORAGE {
-            self.buffer.reference.rdx & !STATIC_BUFFER_FLAG
-        } else {
-            self.buffer.reference.rdx
-        }
+        self.buffer.reference.rdx()
     }
 
     #[inline]
@@ -140,18 +214,28 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
             self.len = (self.len & !RDX_MASK) | (rdx << LEN_MASK.count_ones());
             return;
         }
-        let flags = if STATIC_STORAGE {
-            self.buffer.reference.rdx & STATIC_BUFFER_FLAG
-        } else {
-            0
-        };
-        self.buffer.reference.rdx = rdx | flags;
+        self.buffer.reference.set_rdx(rdx);
+    }
+
+    #[inline]
+    fn get_len(&self) -> usize {
+        if !STATIC_STORAGE && !INLINE_SMALL {
+            return self.len;
+        }
+        /*let zero_or_mask = 0 - ((self.len & INLINE_BUFFER_FLAG) >> INLINE_BUFFER_FLAG.leading_zeros());
+        let conv = !(zero_or_mask & !(BUFFER_TY_MASK | LEN_MASK));
+        let inlined_bit_mask = (usize::MAX & !BUFFER_TY_MASK) & conv;
+        inlined_bit_mask*/
+        if self.is_inlined() {
+            return self.len & LEN_MASK;
+        }
+        self.len & !BUFFER_TY_MASK
     }
 
     #[inline]
     fn set_len(&mut self, len: usize) {
         let flags = if INLINE_SMALL {
-            self.len & (INLINE_BUFFER_FLAG | RDX_MASK)
+            self.len & (BUFFER_TY_MASK | RDX_MASK)
         } else {
             0
         };
@@ -210,10 +294,7 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
 
     #[inline]
     fn len(&self) -> usize {
-        if self.is_inlined() {
-            return self.len & LEN_MASK;
-        }
-        self.len
+        self.len() - self.get_offset()
     }
 
     #[inline]
@@ -268,24 +349,24 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
 
     #[inline]
     fn split_off(&mut self, offset: usize) -> Self {
-        let idx = self.get_rdx() + offset;
-        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let idx = self.get_offset() + self.get_rdx() + offset;
+        assert!(self.get_len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
         let mut other = self.clone();
 
         self.set_len(idx);
-        other.set_rdx(idx);
+        other.set_offset(idx);
 
         other
     }
 
     #[inline]
     fn split_to(&mut self, offset: usize) -> Self {
-        let idx = self.get_rdx() + offset;
-        assert!(self.len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
+        let idx = self.get_offset() + self.get_rdx() + offset;
+        assert!(self.get_len() > idx, "tried splitting buffer with length {} at {}", self.len, idx);
         let mut other = self.clone();
 
         other.set_len(idx);
-        self.set_rdx(idx);
+        self.set_offset(idx);
 
         other
     }
@@ -297,6 +378,7 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
     }
 
     fn unsplit(&mut self, other: Self) {
+        // FIXME: handle offsets in this method correctly!
         if self.is_empty() {
             *self = other;
             return;
@@ -470,7 +552,7 @@ From<&'static [u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, 
             len: value.len(),
             buffer: BufferUnion { reference: ReferenceBuffer { 
                 rdx: 0 | STATIC_BUFFER_FLAG,
-                cap: value.len(),
+                offset: 0,
                 ptr: value.as_ptr().cast_mut(),
              } }
             
@@ -490,14 +572,14 @@ Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         if self.is_static() {
             // try reusing buffer
             if unsafe { self.is_only() } {
-                let ret = unsafe { Vec::from_raw_parts(self.ptr, self.len, self.capacity()) };
+                let ret = unsafe { Vec::from_raw_parts(self.buffer.reference.ptr, self.len, self.capacity()) };
                 mem::forget(self);
                 return ret;
             }
         }
         // TODO: should we try to shrink?
         let cap = self.capacity();
-        let alloc = unsafe { realloc_buffer(self.ptr, self.len, cap) };
+        let alloc = unsafe { realloc_buffer(self.buffer.reference.ptr, self.len, cap) };
         unsafe { Vec::from_raw_parts(alloc, cap, self.len) }
     }
 }
@@ -514,9 +596,7 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             // FIXME: should we reuse the buffer if possible?
             let mut ret = Self {
                 len: len | INLINE_BUFFER_FLAG,
-                rdx: 0,
-                cap: 0,
-                ptr: null_mut(),
+                buffer: BufferUnion { inlined: [0; 3] },
             };
             unsafe { ptr::copy_nonoverlapping(ptr, ret.inlined_buffer_ptr(), len); }
             return ret;
@@ -537,9 +617,7 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         unsafe { *ref_cnt_ptr.cast::<usize>() = 1; }
         Self {
             len,
-            rdx: 0,
-            cap,
-            ptr,
+            buffer: BufferUnion { reference: ReferenceBuffer::new(cap, 0, 0, ptr) },
         }
     }
 }
@@ -550,38 +628,18 @@ From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         if value.is_inlined() {
             return Self {
                 len: value.len,
-                rdx: 0,
-                cap: value.cap,
-                ptr: value.ptr,
+                buffer: BufferUnion { inlined: [value.wrx, value.offset, value.ptr as usize] }
             };
         }
         let aligned_len = align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(value.ptr, value.len) + size_of::<AtomicUsize>();
         debug_assert_eq!((value.ptr as usize + aligned_len) % align_of::<AtomicUsize>(), 0);
-        // reuse the buffer if this instance is the only one.
-        if unsafe { value.is_only() } {
-            let ret = Self {
-                len: value.len,
-                rdx: 0,
-                cap: value.cap,
-                ptr: value.ptr,
-            };
-            mem::forget(value);
-            return ret;
-        }
-        #[inline(never)]
-        #[cold]
-        fn resize_alloc(ptr: *mut u8, len: usize) -> *mut u8 {
-            let cap = len + ADDITIONAL_BUFFER_CAP;
-            let alloc = unsafe { realloc_buffer_counted(ptr, len, cap) };
-            alloc
-        }
-        let alloc = resize_alloc(value.ptr, value.len);
-        Self {
+        // reuse the buffer if this instance as we know that we are the only reference to this part of the buffer
+        let ret = Self {
             len: value.len,
-            rdx: 0,
-            cap: value.cap,
-            ptr: alloc,
-        }
+            buffer: BufferUnion { reference: ReferenceBuffer::new(value.capacity(), value.offset, 0, value.ptr) },
+        };
+        mem::forget(value);
+        ret
     }
 }
 

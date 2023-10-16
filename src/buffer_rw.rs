@@ -31,6 +31,8 @@ pub struct BufferRWGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: us
 const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
 /// the MSB will never be used as allocations are capped at isize::MAX
 const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
+
+// FIXME: move both flags into `len` as we only need 3/4 of the available space in len.
 pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferRWGeneric<0, 0, false, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer_mut::BASE_INLINE_SIZE), buffer::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
@@ -330,6 +332,8 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
             unsafe { ptr::copy_nonoverlapping(inlined_ptr, alloc, self.len()); }
             self.ptr = alloc;
             self.cap = new_size;
+            self.rdx = (self.len & RDX_MASK) >> RDX_MASK.leading_zeros();
+            self.len &= LEN_MASK;
             return;
         }
         if self.is_static() {
@@ -346,6 +350,7 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
             unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len()); }
             self.ptr = alloc;
             self.cap = new_size;
+            self.rdx &= !STATIC_BUFFER_FLAG;
             return;
         }
         let cap = self.cap;

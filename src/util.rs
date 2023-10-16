@@ -131,6 +131,13 @@ pub(crate) const fn build_bit_mask(offset: usize, ones_cnt: usize) -> usize {
     mask << offset
 }
 
+pub(crate) const fn round_up_pow_2(bitset: usize) -> usize {
+    if bitset.is_power_of_two() {
+        return bitset;
+    }
+    bitset.next_power_of_two()
+}
+
 static EMPTY_SENTINEL: u8 = 0;
 
 #[inline]

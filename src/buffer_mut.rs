@@ -23,7 +23,7 @@ pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: u
     pub(crate) len: usize,
     pub(crate) wrx: usize, // this indicates the write index
     pub(crate) offset: usize, // this is an offset into the allocation
-    pub(crate) ptr: *mut u8, // this points to the end of the allocation minus allocation size (in order to use this, one has to mask off the lower bits)
+    pub(crate) ptr: *mut u8,
 }
 
 // FIXME: only allow cap to be a multiple of meta_align in order to be able to use the lower bits to store the additional size that was masked off to align the metadata properly
