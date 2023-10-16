@@ -328,6 +328,24 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
             let alloc = unsafe { alloc_uninit_buffer(new_size) };
             let inlined_ptr = unsafe { (self as *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> as *mut u8).add(size_of::<usize>()) };
             unsafe { ptr::copy_nonoverlapping(inlined_ptr, alloc, self.len()); }
+            self.ptr = alloc;
+            self.cap = new_size;
+            return;
+        }
+        if self.is_static() {
+            let new_size = {
+                let mut new_size = INITIAL_CAP * GROWTH_FACTOR;
+                // if cap * GROWTH_FACTOR is smaller than size, retry
+                while new_size < size {
+                    new_size *= GROWTH_FACTOR;
+                }
+                new_size
+            };
+            // FIXME: alloc buffer and move static data in there
+            let alloc = unsafe { alloc_uninit_buffer(new_size) };
+            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len()); }
+            self.ptr = alloc;
+            self.cap = new_size;
             return;
         }
         let cap = self.cap;
