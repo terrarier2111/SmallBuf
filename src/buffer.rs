@@ -51,8 +51,8 @@ impl ReferenceBuffer {
     #[inline]
     fn new(cap: usize, offset: usize, rdx: usize, ptr: *mut u8) -> Self {
         Self {
-            rdx: rdx | ((cap & (CAP_MASK_LOWER >> CAP_SHIFT_LOWER)) << CAP_SHIFT_UPPER),
-            offset: offset | (cap & (CAP_MASK_UPPER >> CAP_MASK_UPPER) << CAP_SHIFT_UPPER),
+            rdx: rdx | ((cap & (CAP_MASK_LOWER >> CAP_SHIFT_LOWER)) << CAP_SHIFT_LOWER),
+            offset: offset | ((cap & (CAP_MASK_UPPER >> CAP_MASK_UPPER)) << CAP_SHIFT_UPPER),
             ptr,
         }
     }
@@ -129,8 +129,6 @@ impl BufferTy {
 
 }
 
-// FIXME: move both flags inside `len` and move CAP_MASK from len into rdx
-
 pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferGeneric<0, 0, false, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer_mut::BASE_INLINE_SIZE), buffer_rw::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
@@ -188,7 +186,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         if self.is_inlined() {
             return (self.len & OFFSET_MASK) >> OFFSET_MASK.leading_zeros();
         }
-        self.buffer.reference.offset & !CAP_MASK_UPPER
+        self.buffer.reference.offset()
     }
 
     #[inline]
@@ -294,7 +292,7 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
 
     #[inline]
     fn len(&self) -> usize {
-        self.len() - self.get_offset()
+        self.get_len() - self.get_offset()
     }
 
     #[inline]
@@ -378,7 +376,7 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
     }
 
     fn unsplit(&mut self, other: Self) {
-        // FIXME: handle offsets in this method correctly!
+        // FIXME: handle offsets in this method correctly and fix usage of `self.len`!
         if self.is_empty() {
             *self = other;
             return;
