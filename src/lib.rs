@@ -147,9 +147,15 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
 
 pub trait WritableBuffer: GenericBuffer {
 
+    // FIXME: add reserve!
+
     fn with_capacity(capacity: usize) -> Self;
 
     fn zeroed(len: usize) -> Self;
+
+    fn reserve(&mut self, size: usize);
+
+    fn resize(&mut self, size: usize);
 
     fn capacity(&self) -> usize;
 

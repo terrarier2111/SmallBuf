@@ -312,6 +312,48 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
         }
     }
 
+    fn reserve(&mut self, size: usize) {
+        if self.is_inlined() {
+            if size <= INLINE_SIZE {
+                return;
+            }
+            let new_size = {
+                let mut new_size = INITIAL_CAP * GROWTH_FACTOR;
+                // if cap * GROWTH_FACTOR is smaller than size, retry
+                while new_size < size {
+                    new_size *= GROWTH_FACTOR;
+                }
+                new_size
+            };
+            let alloc = unsafe { alloc_uninit_buffer(new_size) };
+            let inlined_ptr = unsafe { (self as *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> as *mut u8).add(size_of::<usize>()) };
+            unsafe { ptr::copy_nonoverlapping(inlined_ptr, alloc, self.len()); }
+            return;
+        }
+        let cap = self.cap;
+        let len = self.len();
+        let remaining = cap - len;
+        if remaining < size {
+            let new_size = {
+                let mut new_size = cap * GROWTH_FACTOR;
+                // if cap * GROWTH_FACTOR is smaller than size, retry
+                while new_size < size {
+                    new_size *= GROWTH_FACTOR;
+                }
+                new_size
+            };
+            let alloc = unsafe { alloc_uninit_buffer(new_size) };
+            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, len); }
+            unsafe { dealloc(self.ptr, cap); }
+            self.ptr = alloc;
+            self.cap = size;
+        }
+    }
+
+    fn resize(&mut self, size: usize) {
+        
+    }
+
     #[inline]
     fn capacity(&self) -> usize {
         // for inlined buffers we always have INLINE_SIZE space
