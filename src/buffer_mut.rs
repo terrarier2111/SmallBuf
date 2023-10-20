@@ -30,7 +30,8 @@ union BufferUnion {
     reference: ReferenceBuffer,
 }
 
-const CAP_OFFSET_MASK: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, CAP_LEN_BITS);
+const COMPRESSED_WORD_SIZE: usize = usize::BITS as usize / 8 * 5;
+const CAP_OFFSET_MASK: usize = build_bit_mask(COMPRESSED_WORD_SIZE, CAP_LEN_BITS);
 const CAP_LEN_BITS: usize = usize::BITS.trailing_zeros() as usize;
 const CAP_MASK_LOWER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1 + CAP_LEN_BITS, usize::BITS as usize / 4 * 1 - 1 - CAP_LEN_BITS) as usize;
 const CAP_MASK_UPPER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, usize::BITS as usize / 4 * 1 - 1) as usize;

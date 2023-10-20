@@ -35,6 +35,12 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
         <Self as From<&'static [u8]>>::from(buf)
     }
 
+    /// Advanced the reader index by `amount`
+    /// 
+    /// #Panic
+    /// May panic when amount exceeds `remaining()`.
+    fn advance(&mut self, amount: usize);
+
     /// this will return the amount of remaining bytes that can be
     /// read from this buffer
     fn remaining(&self) -> usize;
@@ -57,11 +63,11 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
 
     fn unsplit(&mut self, other: Self);
 
-    fn get_bytes(&mut self, bytes: usize) -> &[u8];
+    fn get_slice(&mut self, bytes: usize) -> &[u8];
 
     #[inline]
-    fn get_bytes_bound<const LEN: usize>(&mut self) -> [u8; LEN] {
-        let src = self.get_bytes(LEN);
+    fn get_slice_bound<const LEN: usize>(&mut self) -> [u8; LEN] {
+        let src = self.get_slice(LEN);
         let mut ret = [0; LEN];
         for i in 0..LEN {
             ret[i] = unsafe { *src.get_unchecked(i) };
@@ -73,73 +79,73 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
 
     #[inline]
     fn get_u16_le(&mut self) -> u16 {
-        let bytes = self.get_bytes_bound::<2>();
+        let bytes = self.get_slice_bound::<2>();
         u16::from_le_bytes(bytes)
     }
 
     #[inline]
     fn get_u16_be(&mut self) -> u16 {
-        let bytes = self.get_bytes_bound::<2>();
+        let bytes = self.get_slice_bound::<2>();
         u16::from_be_bytes(bytes)
     }
 
     #[inline]
     fn get_u16_ne(&mut self) -> u16 {
-        let bytes = self.get_bytes_bound::<2>();
+        let bytes = self.get_slice_bound::<2>();
         u16::from_ne_bytes(bytes)
     }
 
     #[inline]
     fn get_u32_le(&mut self) -> u32 {
-        let bytes = self.get_bytes_bound::<4>();
+        let bytes = self.get_slice_bound::<4>();
         u32::from_le_bytes(bytes)
     }
 
     #[inline]
     fn get_u32_be(&mut self) -> u32 {
-        let bytes = self.get_bytes_bound::<4>();
+        let bytes = self.get_slice_bound::<4>();
         u32::from_be_bytes(bytes)
     }
 
     #[inline]
     fn get_u32_ne(&mut self) -> u32 {
-        let bytes = self.get_bytes_bound::<4>();
+        let bytes = self.get_slice_bound::<4>();
         u32::from_ne_bytes(bytes)
     }
 
     #[inline]
     fn get_u64_le(&mut self) -> u64 {
-        let bytes = self.get_bytes_bound::<8>();
+        let bytes = self.get_slice_bound::<8>();
         u64::from_le_bytes(bytes)
     }
 
     #[inline]
     fn get_u64_be(&mut self) -> u64 {
-        let bytes = self.get_bytes_bound::<8>();
+        let bytes = self.get_slice_bound::<8>();
         u64::from_be_bytes(bytes)
     }
 
     #[inline]
     fn get_u64_ne(&mut self) -> u64 {
-        let bytes = self.get_bytes_bound::<8>();
+        let bytes = self.get_slice_bound::<8>();
         u64::from_ne_bytes(bytes)
     }
 
     #[inline]
     fn get_u128_le(&mut self) -> u128 {
-        let bytes = self.get_bytes_bound::<16>();
+        let bytes = self.get_slice_bound::<16>();
         u128::from_le_bytes(bytes)
     }
 
     #[inline]
     fn get_u128_be(&mut self) -> u128 {
-        let bytes = self.get_bytes_bound::<16>();
+        let bytes = self.get_slice_bound::<16>();
         u128::from_be_bytes(bytes)
     }
 
     #[inline]
     fn get_u128_ne(&mut self) -> u128 {
-        let bytes = self.get_bytes_bound::<16>();
+        let bytes = self.get_slice_bound::<16>();
         u128::from_ne_bytes(bytes)
     }
 
@@ -159,80 +165,82 @@ pub trait WritableBuffer: GenericBuffer {
 
     fn capacity(&self) -> usize;
 
-    fn put_bytes(&mut self, val: &[u8]);
+    fn put_bytes(val: u8, repeat: usize);
+
+    fn put_slice(&mut self, val: &[u8]);
 
     fn put_u8(&mut self, val: u8);
 
     #[inline]
     fn put_u16_le(&mut self, val: u16) {
         let raw = val.to_le_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u16_be(&mut self, val: u16) {
         let raw = val.to_be_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u16_ne(&mut self, val: u16) {
         let raw = val.to_ne_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u32_le(&mut self, val: u32) {
         let raw = val.to_le_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u32_be(&mut self, val: u32) {
         let raw = val.to_be_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u32_ne(&mut self, val: u32) {
         let raw = val.to_ne_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u64_le(&mut self, val: u64) {
         let raw = val.to_le_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u64_be(&mut self, val: u64) {
         let raw = val.to_be_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u64_ne(&mut self, val: u64) {
         let raw = val.to_ne_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u128_le(&mut self, val: u128) {
         let raw = val.to_le_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u128_be(&mut self, val: u128) {
         let raw = val.to_be_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
     #[inline]
     fn put_u128_ne(&mut self, val: u128) {
         let raw = val.to_ne_bytes();
-        self.put_bytes(&raw);
+        self.put_slice(&raw);
     }
 
 }
@@ -284,7 +292,7 @@ mod tests {
         assert!(converted.len() > 0);
         assert!(converted.capacity() > 0);
         let mut cloned = converted.clone();
-        println!("base ptr: {}", cloned.ptr as usize);
+        println!("base ptr: {}", cloned.buffer.ptr as usize);
         assert_eq!(cloned.len(), converted.len());
         assert_eq!(cloned.capacity(), converted.capacity());
 
