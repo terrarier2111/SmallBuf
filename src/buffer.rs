@@ -1,4 +1,4 @@
-use std::mem::{align_of, size_of};
+use std::mem::{align_of, size_of, transmute};
 use std::ops::{Deref, RangeBounds};
 use std::process::abort;
 use std::{mem, ptr};
@@ -7,7 +7,7 @@ use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::{buffer_mut, buffer_rw, GenericBuffer, ReadableBuffer, ReadonlyBuffer, WritableBuffer};
 use crate::buffer_mut::BufferMutGeneric;
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, build_bit_mask, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted, round_up_pow_2};
+use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, build_bit_mask, dealloc, empty_sentinel, min, realloc_buffer, realloc_buffer_counted, round_up_pow_2, TAIL_MASK, TAIL_SHIFT, COMPRESSED_WORD_SIZE, translate_cap, WORD_MASK};
 
 pub type Buffer = BufferGeneric;
 
@@ -15,15 +15,33 @@ pub type Buffer = BufferGeneric;
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
+// FIXME: change design to preserve wrx even inside read only buffers!
+
 const INLINE_SIZE_BITS: usize = round_up_pow_2(INLINE_SIZE).trailing_zeros() as usize;
-const LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
-const RDX_MASK: usize = build_bit_mask(INLINE_SIZE_BITS, INLINE_SIZE_BITS);
-const OFFSET_MASK: usize = build_bit_mask(INLINE_SIZE_BITS * 2, INLINE_SIZE_BITS);
+const INLINE_LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
+const INLINE_OFFSET_MASK: usize = build_bit_mask(INLINE_SIZE_BITS, INLINE_SIZE_BITS);
+const INLINE_RDX_MASK: usize = build_bit_mask(INLINE_SIZE_BITS * 2, INLINE_SIZE_BITS);
 
 #[repr(C)]
 pub struct BufferGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
     pub(crate) len: usize, // the last 2 bits indicate the type of allocation at hand
     pub(crate) buffer: BufferUnion,
+}
+
+impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
+BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+
+    #[inline]
+    fn set_capacity_outlined(&mut self, cap: usize) {
+        let cap_offset = self.buffer.reference.set_capacity_raw(cap);
+        self.len = (self.len & WORD_MASK) | (cap_offset << TAIL_SHIFT);
+    }
+
+    #[inline]
+    fn get_capacity_outlined(&self) -> usize {
+        self.buffer.reference.capacity_raw() << ((self.len & CAP_OFFSET_MASK) >> CAP_OFFSET_SHIFT)
+    }
+
 }
 
 #[repr(C)]
@@ -32,12 +50,11 @@ union BufferUnion {
     reference: ReferenceBuffer,
 }
 
-const CAP_OFFSET_MASK: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, CAP_LEN_BITS);
-const CAP_LEN_BITS: usize = usize::BITS.trailing_zeros() as usize;
-const CAP_MASK_LOWER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1 + CAP_LEN_BITS, usize::BITS as usize / 4 * 1 - 1 - CAP_LEN_BITS) as usize;
-const CAP_MASK_UPPER: usize = build_bit_mask(usize::BITS as usize - usize::BITS as usize / 4 * 1, usize::BITS as usize / 4 * 1 - 1) as usize;
-const CAP_SHIFT_LOWER: usize = usize::BITS as usize - usize::BITS as usize / 4 * 1 + CAP_LEN_BITS;
-const CAP_SHIFT_UPPER: usize = usize::BITS as usize - usize::BITS as usize / 4 * 1 - (usize::BITS as usize / 4 * 1 - 1 - CAP_LEN_BITS);
+const CAP_OFFSET_MASK: usize = build_bit_mask(COMPRESSED_WORD_SIZE, CAP_OFFSET_BITS);
+const CAP_OFFSET_SHIFT: usize = TAIL_SHIFT;
+const CAP_OFFSET_BITS: usize = usize::BITS.trailing_zeros() as usize;
+const CAP_MASK: usize = TAIL_MASK;
+const CAP_SHIFT: usize = TAIL_SHIFT;
 
 #[derive(Clone, Copy)]
 struct ReferenceBuffer {
@@ -49,38 +66,46 @@ struct ReferenceBuffer {
 impl ReferenceBuffer {
 
     #[inline]
-    fn new(cap: usize, offset: usize, rdx: usize, ptr: *mut u8) -> Self {
+    fn new(len_ref: &mut usize, cap: usize, offset: usize, rdx: usize, ptr: *mut u8) -> Self {
+        let (cap, cap_offset) = translate_cap(cap);
+        *len_ref = (*len_ref & !CAP_OFFSET_MASK) | (cap_offset << CAP_OFFSET_SHIFT);
         Self {
-            rdx: rdx | ((cap & (CAP_MASK_LOWER >> CAP_SHIFT_LOWER)) << CAP_SHIFT_LOWER),
-            offset: offset | ((cap & (CAP_MASK_UPPER >> CAP_MASK_UPPER)) << CAP_SHIFT_UPPER),
+            rdx,
+            offset: offset | (cap << CAP_SHIFT),
             ptr,
         }
     }
 
     #[inline]
-    fn capacity(&self) -> usize {
-        ((self.rdx & CAP_MASK_LOWER) >> CAP_SHIFT_LOWER) | ((self.offset & CAP_MASK_UPPER) >> CAP_SHIFT_UPPER)
+    fn capacity_raw(&self) -> usize {
+        (self.offset & CAP_MASK) >> CAP_SHIFT
+    }
+
+    #[inline]
+    fn set_capacity_raw(&mut self, cap: usize) -> usize {
+        let (cap, cap_offset) = translate_cap(cap);
+        self.offset = (self.offset & WORD_MASK) | (cap << TAIL_SHIFT);
+        cap_offset
     }
 
     #[inline]
     fn rdx(&self) -> usize {
-        self.rdx & !(CAP_MASK_LOWER | CAP_OFFSET_MASK)
+        self.rdx
     }
 
     #[inline]
     fn set_rdx(&mut self, rdx: usize) {
-        self.rdx &= CAP_MASK_LOWER | CAP_OFFSET_MASK;
-        self.rdx |= rdx;
+        self.rdx = rdx;
     }
 
     #[inline]
     fn offset(&self) -> usize {
-        self.offset & !CAP_MASK_UPPER
+        self.offset & !CAP_MASK
     }
 
     #[inline]
     fn set_offset(&mut self, offset: usize) {
-        self.offset &= CAP_MASK_UPPER;
+        self.offset &= CAP_MASK;
         self.offset |= offset;
     }
 
@@ -184,7 +209,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     pub(crate) fn get_offset(&self) -> usize {
         if self.is_inlined() {
-            return (self.len & OFFSET_MASK) >> OFFSET_MASK.leading_zeros();
+            return (self.len & INLINE_OFFSET_MASK) >> INLINE_OFFSET_MASK.leading_zeros();
         }
         self.buffer.reference.offset()
     }
@@ -192,7 +217,7 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     pub(crate) fn set_offset(&self, offset: usize) {
         if self.is_inlined() {
-            self.len = offset | (self.len & (LEN_MASK | RDX_MASK | BUFFER_TY_MASK));
+            self.len = offset | (self.len & (INLINE_LEN_MASK | BUFFER_TY_MASK));
             return;
         }
         self.buffer.reference.set_offset(offset);
@@ -246,14 +271,14 @@ BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         if self.is_inlined() {
             return INLINE_SIZE;
         }
-        self.buffer.reference.capacity()
+        self.get_capacity_outlined()
     }
 
     /// SAFETY: this may only be called if the buffer isn't
     /// inlined and isn't a static buffer
     #[inline]
     pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
-        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.buffer.reference.ptr, self.buffer.reference.capacity()) }
+        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.buffer.reference.ptr, self.get_capacity_outlined()) }
     }
 
     /// SAFETY: this may only be called if the buffer is inlined.
@@ -316,15 +341,16 @@ GenericBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
             return;
         }
         let target_cap = self.len + ADDITIONAL_BUFFER_CAP;
-        if self.capacity() <= target_cap {
+        if self.get_capacity_outlined() <= target_cap {
             // we have nothing to do as our capacity is already as small as possible
             return;
         }
-        let alloc = unsafe { realloc_buffer_counted(self.buffer.reference.ptr, self.len, target_cap) };
+        let alloc = unsafe { realloc_buffer_counted(self.buffer.reference.ptr, self.len & WORD_MASK, target_cap) };
         let old = self.buffer.reference.ptr;
-        let cap = self.capacity();
+        let cap = self.get_capacity_outlined();
         unsafe { dealloc(old, cap); }
         self.buffer.reference.ptr = alloc;
+        self.set_capacity_outlined(self.len & WORD_MASK);
     }
 
     #[inline]
@@ -423,7 +449,7 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
     }
 
     #[inline]
-    fn get_bytes(&mut self, bytes: usize) -> &[u8] {
+    fn get_slice(&mut self, bytes: usize) -> &[u8] {
         let ptr = self.ensure_readable(bytes);
         self.buffer.reference.rdx += bytes;
         unsafe { &*slice_from_raw_parts(ptr, bytes) }
@@ -434,6 +460,12 @@ ReadableBuffer for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATI
         let ptr = self.ensure_readable(1);
         self.buffer.reference.rdx += 1;
         unsafe { *ptr }
+    }
+
+    fn advance(&mut self, amount: usize) {
+        let new_rdx = self.get_rdx() + amount;
+        assert!(new_rdx < self.len & WORD_MASK);
+        self.set_rdx(new_rdx);
     }
 
 }
@@ -546,13 +578,11 @@ impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: b
 From<&'static [u8]> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     #[inline]
     fn from(value: &'static [u8]) -> Self {
+        let mut len = value.len();
+        let buffer = ReferenceBuffer::new(&mut len, value.len(), 0, 0, value as *const [u8] as *mut u8);
         Self {
-            len: value.len(),
-            buffer: BufferUnion { reference: ReferenceBuffer { 
-                rdx: 0 | STATIC_BUFFER_FLAG,
-                offset: 0,
-                ptr: value.as_ptr().cast_mut(),
-             } }
+            len,
+            buffer: BufferUnion { reference: buffer, },
             
         }
     }
@@ -570,15 +600,15 @@ Into<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         if self.is_static() {
             // try reusing buffer
             if unsafe { self.is_only() } {
-                let ret = unsafe { Vec::from_raw_parts(self.buffer.reference.ptr, self.len, self.capacity()) };
+                let ret = unsafe { Vec::from_raw_parts(self.buffer.reference.ptr, self.len & WORD_MASK, self.get_capacity_outlined()) };
                 mem::forget(self);
                 return ret;
             }
         }
         // TODO: should we try to shrink?
-        let cap = self.capacity();
-        let alloc = unsafe { realloc_buffer(self.buffer.reference.ptr, self.len, cap) };
-        unsafe { Vec::from_raw_parts(alloc, cap, self.len) }
+        let cap = self.get_capacity_outlined();
+        let alloc = unsafe { realloc_buffer(self.buffer.reference.ptr, self.len & WORD_MASK, cap) };
+        unsafe { Vec::from_raw_parts(alloc, cap, self.len & WORD_MASK) }
     }
 }
 
@@ -587,7 +617,7 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     fn from(mut value: Vec<u8>) -> Self {
         let mut ptr = value.as_mut_ptr();
         let mut cap = value.capacity();
-        let len = value.len();
+        let mut len = value.len();
         let available = cap - len;
         // handle small buffers
         if INLINE_SMALL && len <= INLINE_SIZE {
@@ -613,9 +643,10 @@ From<Vec<u8>> for BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
         };
         // init ref cnt
         unsafe { *ref_cnt_ptr.cast::<usize>() = 1; }
+        let buffer = ReferenceBuffer::new(&mut len, cap, 0, 0, ptr);
         Self {
             len,
-            buffer: BufferUnion { reference: ReferenceBuffer::new(cap, 0, 0, ptr) },
+            buffer: BufferUnion { reference: buffer, },
         }
     }
 }
@@ -626,18 +657,13 @@ From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         if value.is_inlined() {
             return Self {
                 len: value.len,
-                buffer: BufferUnion { inlined: [value.wrx, value.offset, value.ptr as usize] }
+                buffer: BufferUnion { inlined: value.buffer.inlined, },
             };
         }
-        let aligned_len = align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(value.ptr, value.len) + size_of::<AtomicUsize>();
-        debug_assert_eq!((value.ptr as usize + aligned_len) % align_of::<AtomicUsize>(), 0);
+        let aligned_len = align_unaligned_len_to::<{ align_of::<AtomicUsize>() }>(value.buffer.reference.ptr, value.len) + size_of::<AtomicUsize>();
+        debug_assert_eq!((value.buffer.reference.ptr as usize + aligned_len) % align_of::<AtomicUsize>(), 0);
         // reuse the buffer if this instance as we know that we are the only reference to this part of the buffer
-        let ret = Self {
-            len: value.len,
-            buffer: BufferUnion { reference: ReferenceBuffer::new(value.capacity(), value.offset, 0, value.ptr) },
-        };
-        mem::forget(value);
-        ret
+        unsafe { transmute::<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>, BufferGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>>(value) }
     }
 }
 
@@ -648,19 +674,17 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
         if self.is_inlined() {
             return BufferMutGeneric {
                 len: self.len,
-                ptr: self.ptr,
-                cap: self.capacity(),
-                offset: self.rdx,
+                buffer: buffer_mut::BufferUnion { inlined: self.buffer.inlined, },
             };
         }
         if self.is_static() {
-            let cap = self.len + ADDITIONAL_BUFFER_CAP;
-            let alloc = unsafe { realloc_buffer(self.ptr, self.len, cap) };
+            let cap = self.len + ADDITIONAL_BUFFER_CAP; // TODO: should we multiply with growth factor?
+            let alloc = unsafe { realloc_buffer(self.buffer.reference.ptr, self.len & WORD_MASK, cap) };
+            let mut len = self.len & WORD_MASK;
+            let buffer = buffer_mut::ReferenceBuffer::new(&mut len, cap, self.get_offset(), len, alloc);
             let ret = BufferMutGeneric {
-                len: self.len,
-                ptr: alloc,
-                cap,
-                offset: self.rdx,
+                len,
+                buffer: buffer_mut::BufferUnion { reference: buffer, },
             };
             // set ref cnt
             unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
@@ -676,7 +700,7 @@ Into<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
             mem::forget(self);
             return ret;
         }
-        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.len + ADDITIONAL_BUFFER_CAP) };
+        let alloc = unsafe { realloc_buffer_counted(self.buffer.reference.ptr, self.len & WORD_MASK, (self.len & WORD_MASK) + ADDITIONAL_BUFFER_CAP) };
 
         BufferMutGeneric {
             len: self.len,

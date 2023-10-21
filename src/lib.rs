@@ -165,7 +165,7 @@ pub trait WritableBuffer: GenericBuffer {
 
     fn capacity(&self) -> usize;
 
-    fn put_bytes(val: u8, repeat: usize);
+    fn put_bytes(&mut self, val: u8, repeat: usize);
 
     fn put_slice(&mut self, val: &[u8]);
 
