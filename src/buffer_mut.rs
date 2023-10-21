@@ -37,6 +37,8 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
         self.buffer.reference.capacity_raw() << ((self.len & CAP_OFFSET_MASK) >> CAP_OFFSET_SHIFT)
     }
 
+    pub(crate) fn set
+
 }
 
 #[repr(C)]
@@ -50,6 +52,9 @@ const CAP_OFFSET_SHIFT: usize = TAIL_SHIFT;
 const CAP_OFFSET_BITS: usize = usize::BITS.trailing_zeros() as usize;
 const CAP_MASK: usize = TAIL_MASK;
 const CAP_SHIFT: usize = TAIL_SHIFT;
+
+const RDX_LOWER_MASK: usize = build_bit_mask(usize::BITS as usize / 4 * 3, usize::BITS as usize / 4 * 1);
+const RDX_LOWER_SHIFT: usize = RDX_LOWER_MASK.leading_zeros() as usize;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ReferenceBuffer {
@@ -73,7 +78,7 @@ pub(crate) struct ReferenceBuffer {
 
 // -> 2 bits remaining!
 
-// 1. word: len[40 bits], cap_offset [4 bits], rdx_upper[20 bits]
+// 1. word: len[40 bits], cap_offset [4 bits], rdx_upper[16 bits]
 // 2. word: wrx[40 bits], rdx_lower[24 bits]
 // 3. word: offset[40 bits], capacity[24 bits]
 
@@ -106,12 +111,22 @@ impl ReferenceBuffer {
 
     #[inline]
     fn wrx(&self) -> usize {
-        self.wrx
+        self.wrx & WORD_MASK
     }
 
     #[inline]
     fn set_wrx(&mut self, wrx: usize) {
-        self.wrx = wrx;
+        self.wrx = wrx | (self.wrx & TAIL_MASK);
+    }
+
+    #[inline]
+    fn rdx_lower(&self) -> usize {
+        (self.wrx & TAIL_MASK) >> TAIL_SHIFT
+    }
+
+    #[inline]
+    fn set_rdx_lower(&mut self, rdx: usize) {
+        self.wrx |= rdx << RDX_LOWER_SHIFT;
     }
 
     #[inline]
