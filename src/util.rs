@@ -28,7 +28,7 @@ pub(crate) unsafe fn dealloc(ptr: *mut u8, len: usize) {
 }
 
 #[inline]
-pub(crate) fn find_sufficient_cap<const GROWTH_FACTOR: usize>(curr: usize, req: usize) -> usize {
+pub(crate) const fn find_sufficient_cap<const GROWTH_FACTOR: usize>(curr: usize, req: usize) -> usize {
     let mut curr = curr;
     loop {
         if curr >= req {
@@ -51,7 +51,7 @@ pub(crate) unsafe fn offset_if_equal<const OFFSET: usize>(src: *mut u8, dst: *mu
 }
 
 #[inline]
-fn align_to<const ALIGNMENT: usize>(val: usize) -> usize {
+const fn align_to<const ALIGNMENT: usize>(val: usize) -> usize {
     let additional = val % ALIGNMENT;
     let diff = ALIGNMENT - additional;
     val + diff
@@ -143,4 +143,37 @@ static EMPTY_SENTINEL: u8 = 0;
 #[inline]
 pub(crate) fn empty_sentinel() -> *mut u8 {
     (&EMPTY_SENTINEL as *const u8).cast_mut()
+}
+
+pub(crate) const COMPRESSED_WORD_SIZE: usize = usize::BITS as usize / 8 * 5;
+pub(crate) const TAIL_SPACE: usize = usize::BITS as usize - COMPRESSED_WORD_SIZE;
+
+pub(crate) const WORD_MASK: usize = build_bit_mask(0, COMPRESSED_WORD_SIZE);
+pub(crate) const TAIL_MASK: usize = build_bit_mask(COMPRESSED_WORD_SIZE, TAIL_SPACE);
+pub(crate) const TAIL_SHIFT: usize = COMPRESSED_WORD_SIZE;
+
+// returns a pair of capacity and capacity_offset
+#[inline]
+pub(crate) const fn translate_cap(capacity: usize) -> (usize, usize) {
+    let req_bit = round_up_pow_2(capacity).leading_zeros() as usize;
+    let offset = req_bit.saturating_sub(TAIL_SPACE);
+    let clear_offset = usize::BITS as usize - offset;
+    // get the lower bits that normally get cleared.
+    let lower_bits = capacity << clear_offset;
+    let rounded_cap = greater_zero_ret_one(lower_bits) << (clear_offset + 1);
+    ((capacity >> offset) + rounded_cap, offset)
+}
+
+/// a short, branchless algorithm that is eqivalent to
+/// if num > 0:
+///    ret 1
+/// else:
+///    ret 0
+#[inline]
+const fn greater_zero_ret_one(num: usize) -> usize {
+    const MSB_OFF: usize = (usize::BITS - 1) as usize;
+
+    // if num is 0, identity will have a value of 0 as all bits are 0, for other values, this will overflow.
+    let identity = 0_usize - num;
+    identity >> MSB_OFF
 }
