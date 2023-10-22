@@ -3,15 +3,13 @@ use std::mem::size_of;
 use crate::util::{build_bit_mask, COMPRESSED_WORD_SIZE, TAIL_SHIFT, TAIL_MASK, translate_cap, WORD_MASK, round_up_pow_2};
 
 /// This is the size of the `inlined` field in `BufferUnion`
-const INLINE_SIZE: usize = size_of::<[usize; 3]>();
-const INLINE_SIZE_BITS: usize = round_up_pow_2(INLINE_SIZE).trailing_zeros() as usize;
-const INLINE_LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
-const INLINE_OFFSET_MASK: usize = build_bit_mask(INLINE_OFFSET_MASK_SHIFT, INLINE_SIZE_BITS);
-const INLINE_OFFSET_MASK_SHIFT: usize = INLINE_SIZE_BITS;
+pub(crate) const INLINE_SIZE: usize = size_of::<[usize; 3]>();
+pub(crate) const INLINE_SIZE_BITS: usize = round_up_pow_2(INLINE_SIZE).trailing_zeros() as usize;
 
+#[derive(Clone)]
 pub(crate) struct BaseBuffer {
-    len: usize,
-    buffer: BufferUnion,
+    pub(crate) len: usize,
+    pub(crate) buffer: BufferUnion,
 }
 
 impl BaseBuffer {
@@ -29,7 +27,7 @@ impl BaseBuffer {
     #[inline]
     pub fn new_inlined(len: usize, offset: usize, value: [usize; 3]) -> Self {
         Self {
-            len: len | (offset << INLINE_OFFSET_MASK_SHIFT),
+            len: len | (offset << INLINE_OFFSET_SHIFT),
             buffer: BufferUnion { inlined: [0; 3], },
         }
     }
@@ -61,7 +59,53 @@ impl BaseBuffer {
 
     #[inline]
     pub fn offset_inlined(&self) -> usize {
-        (self.len & INLINE_OFFSET_MASK) >> INLINE_OFFSET_MASK_SHIFT
+        (self.len & INLINE_OFFSET_MASK) >> INLINE_OFFSET_SHIFT
+    }
+
+    #[inline]
+    pub fn set_offset_reference(&mut self, offset: usize) {
+        self.buffer.reference.offset = (self.buffer.reference.offset & TAIL_MASK) | offset;
+    }
+
+    #[inline]
+    pub fn set_offset_inlined(&mut self, offset: usize) {
+        self.len = (self.len & !INLINE_OFFSET_MASK) | (offset << INLINE_OFFSET_SHIFT);
+    }
+
+    #[inline]
+    pub fn wrx_reference(&self) -> usize {
+        self.buffer.reference.wrx & WORD_MASK
+    }
+
+    #[inline]
+    pub fn wrx_inlined(&self) -> usize {
+        (self.len & INLINE_WRX_MASK) >> INLINE_WRX_SHIFT
+    }
+
+    #[inline]
+    pub fn set_wrx_reference(&mut self, wrx: usize) {
+        self.buffer.reference.wrx = (self.buffer.reference.wrx & TAIL_MASK) | wrx;
+    }
+
+    #[inline]
+    pub fn set_wrx_inlined(&mut self, wrx: usize) {
+        self.len = (self.len & !INLINE_WRX_MASK) | (wrx << INLINE_WRX_SHIFT);
+    }
+
+    #[inline]
+    pub fn rdx_reference(&self) -> usize {
+        ((self.buffer.reference.wrx & RDX_LOWER_MASK) >> RDX_LOWER_SHIFT) | ((self.len & RDX_UPPER_MASK) >> (RDX_UPPER_SHIFT - RDX_LOWER_SHIFT))
+    }
+
+    #[inline]
+    pub fn rdx_inlined(&self) -> usize {
+        (self.len & INLINE_RDX_MASK) >> INLINE_RDX_SHIFT
+    }
+
+    #[inline]
+    pub fn set_rdx_reference(&mut self, rdx: usize) {
+        self.buffer.reference.wrx = (self.buffer.reference.wrx & WORD_MASK) | (rdx << RDX_LOWER_SHIFT);
+        self.len = (self.len & !RDX_UPPER_MASK) | ((rdx << (RDX_UPPER_SHIFT - RDX_LOWER_SHIFT)) & RDX_UPPER_MASK);
     }
 
 }
