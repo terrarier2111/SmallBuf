@@ -11,7 +11,7 @@ const INLINE_RDX_MASK: usize = build_bit_mask(INLINE_RDX_SHIFT, INLINE_SIZE_BITS
 const INLINE_RDX_SHIFT: usize = INLINE_SIZE_BITS * 3;
 
 const RDX_UPPER_MASK: usize = build_bit_mask(RDX_UPPER_SHIFT, usize::BITS as usize / 4 * 1);
-const RDX_UPPER_SHIFT: usize = usize::BITS as usize / 4 * 3;
+const RDX_UPPER_SHIFT: usize = CAP_OFFSET_SHIFT + CAP_OFFSET_BITS;
 
 const RDX_LOWER_MASK: usize = build_bit_mask(usize::BITS as usize / 8 * 5, usize::BITS as usize / 8 * 3);
 const RDX_LOWER_SHIFT: usize = RDX_LOWER_MASK.trailing_zeros() as usize;
@@ -37,9 +37,11 @@ const CAP_SHIFT: usize = TAIL_SHIFT;
 //
 // -> 2 bits remaining!
 //
-// 1. word: len[40 bits], cap_offset [4 bits], rdx_upper[16 bits]
+// 1. word: len[40 bits], cap_offset [4 bits], rdx_upper[16 bits], unused[2 bits], flags[2 bits]
 // 2. word: wrx[40 bits], rdx_lower[24 bits]
 // 3. word: offset[40 bits], capacity[24 bits]
+
+/// This format is slower but allows for a maximum capacity of `size_of(usize) / 8 * 5`.
 #[derive(Clone)]
 pub struct FormatExtended(BaseBuffer);
 
