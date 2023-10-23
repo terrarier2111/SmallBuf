@@ -4,8 +4,10 @@ use std::ops::Deref;
 use std::{mem, ptr};
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::buffer_format::BufferFormat;
+use crate::buffer_format::half::FormatHalf;
 use crate::{buffer, buffer_rw, GenericBuffer, WritableBuffer};
-use crate::util::{align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, COMPRESSED_WORD_SIZE, TAIL_SPACE, round_up_pow_2, translate_cap, TAIL_MASK, TAIL_SHIFT, WORD_MASK};
+use crate::util::{align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted, round_up_pow_2};
 
 pub type BufferMut = BufferMutGeneric;
 
@@ -13,166 +15,8 @@ pub type BufferMut = BufferMutGeneric;
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
-const INLINE_SIZE_BITS: usize = round_up_pow_2(INLINE_SIZE).trailing_zeros() as usize;
-const INLINE_LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
-const INLINE_OFFSET_MASK: usize = build_bit_mask(INLINE_SIZE_BITS, INLINE_SIZE_BITS);
-
 #[repr(C)]
-pub struct BufferMutGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true> {
-    pub(crate) len: usize,
-    pub(crate) buffer: BufferUnion,
-}
-
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool> 
-BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
-
-    #[inline]
-    pub(crate) fn set_capacity_outlined(&mut self, cap: usize) {
-        let cap_offset = self.buffer.reference.set_capacity_raw(cap);
-        self.len = (self.len & WORD_MASK) | (cap_offset << TAIL_SHIFT);
-    }
-
-    #[inline]
-    pub(crate) fn get_capacity_outlined(&self) -> usize {
-        self.buffer.reference.capacity_raw() << ((self.len & CAP_OFFSET_MASK) >> CAP_OFFSET_SHIFT)
-    }
-
-    pub(crate) fn set
-
-}
-
-#[repr(C)]
-pub(crate) union BufferUnion {
-    pub(crate) inlined: [usize; 3],
-    pub(crate) reference: ReferenceBuffer,
-}
-
-const CAP_OFFSET_MASK: usize = build_bit_mask(COMPRESSED_WORD_SIZE, CAP_OFFSET_BITS);
-const CAP_OFFSET_SHIFT: usize = TAIL_SHIFT;
-const CAP_OFFSET_BITS: usize = usize::BITS.trailing_zeros() as usize;
-const CAP_MASK: usize = TAIL_MASK;
-const CAP_SHIFT: usize = TAIL_SHIFT;
-
-const RDX_LOWER_MASK: usize = build_bit_mask(usize::BITS as usize / 4 * 3, usize::BITS as usize / 4 * 1);
-const RDX_LOWER_SHIFT: usize = RDX_LOWER_MASK.leading_zeros() as usize;
-
-#[derive(Clone, Copy)]
-pub(crate) struct ReferenceBuffer {
-    pub(crate) wrx: usize,
-    pub(crate) offset: usize,
-    pub(crate) ptr: *mut u8,
-}
-
-// representation on 64 bit systems:
-
-// total available bits: 64 * 3 = 192
-// writer index: 40
-// reader index: 40
-// offset: 40
-// len: 40
-// flags: 2
-// 192 - 40 - 40 - 40 - 40 - 2 = 30
-// capacity: 24
-// capacity shift: 4
-// 30 - 24 - 4 = 2
-
-// -> 2 bits remaining!
-
-// 1. word: len[40 bits], cap_offset [4 bits], rdx_upper[16 bits]
-// 2. word: wrx[40 bits], rdx_lower[24 bits]
-// 3. word: offset[40 bits], capacity[24 bits]
-
-// FIXME: change design to preserve rdx even inside write only buffers!
-
-impl ReferenceBuffer {
-
-    #[inline]
-    pub(crate) fn new(len_ref: &mut usize, cap: usize, offset: usize, wrx: usize, ptr: *mut u8) -> Self {
-        let (cap, cap_offset) = translate_cap(cap);
-        *len_ref = (*len_ref & !CAP_OFFSET_MASK) | (cap_offset << CAP_OFFSET_SHIFT);
-        Self {
-            wrx,
-            offset: offset | (cap << CAP_SHIFT),
-            ptr,
-        }
-    }
-
-    #[inline]
-    fn capacity_raw(&self) -> usize {
-        (self.offset & CAP_MASK) >> CAP_SHIFT
-    }
-
-    #[inline]
-    fn set_capacity_raw(&mut self, cap: usize) -> usize {
-        let (cap, cap_offset) = translate_cap(cap);
-        self.offset = (self.offset & WORD_MASK) | (cap << TAIL_SHIFT);
-        cap_offset
-    }
-
-    #[inline]
-    fn wrx(&self) -> usize {
-        self.wrx & WORD_MASK
-    }
-
-    #[inline]
-    fn set_wrx(&mut self, wrx: usize) {
-        self.wrx = wrx | (self.wrx & TAIL_MASK);
-    }
-
-    #[inline]
-    fn rdx_lower(&self) -> usize {
-        (self.wrx & TAIL_MASK) >> TAIL_SHIFT
-    }
-
-    #[inline]
-    fn set_rdx_lower(&mut self, rdx: usize) {
-        self.wrx |= rdx << RDX_LOWER_SHIFT;
-    }
-
-    #[inline]
-    fn offset(&self) -> usize {
-        self.offset & !CAP_MASK
-    }
-
-    #[inline]
-    fn set_offset(&mut self, offset: usize) {
-        self.offset &= CAP_MASK;
-        self.offset |= offset;
-    }
-
-}
-
-const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
-
-/// the last bit will never be used as allocations are capped at usize::MAX / 4 * 3
-const BUFFER_TY_MASK: usize = build_bit_mask(usize::BITS as usize - 1, 1);
-
-#[derive(Clone, Copy)]
-struct BufferTy(usize);
-
-impl BufferTy {
-
-    #[inline]
-    pub const fn new_inlined() -> Self {
-        Self(INLINE_BUFFER_FLAG)
-    }
-
-    #[inline]
-    pub const fn new_heap() -> Self {
-        Self(0)
-    }
-
-    #[inline]
-    const fn is_inlined(self) -> bool {
-        self.0 & INLINE_BUFFER_FLAG != 0
-    }
-
-    #[inline]
-    const fn is_heap(self) -> bool {
-        self.0 == 0
-    }
-
-}
+pub struct BufferMutGeneric<LAYOUT: BufferFormat<INLINE_SMALL, false> = FormatHalf, const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true>(LAYOUT);
 
 // FIXME: only allow cap to be a multiple of meta_align in order to be able to use the lower bits to store the additional size that was masked off to align the metadata properly
 
@@ -189,13 +33,13 @@ const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer::BASE_INLINE_SIZE), 
 const ADDITIONAL_BUFFER_CAP: usize = METADATA_SIZE + align_of::<usize>() - 1;
 const METADATA_SIZE: usize = size_of::<usize>() * 1;
 
-unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Send for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
-unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Sync for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
+unsafe impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Send for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
+unsafe impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Sync for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {}
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn new() -> Self {
         Self {
@@ -270,8 +114,8 @@ GenericBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 
     #[inline]
     pub(crate) fn is_inlined(&self) -> bool {
@@ -354,8 +198,8 @@ BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 
     fn with_capacity(cap: usize) -> Self {
         if INLINE_SMALL && cap <= INLINE_SIZE {
@@ -439,8 +283,8 @@ WritableBuffer for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
 
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Drop for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn drop(&mut self) {
         if self.is_inlined() {
@@ -465,8 +309,8 @@ Drop for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Clone for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn clone(&self) -> Self {
         if self.is_inlined() {
@@ -487,8 +331,8 @@ Clone for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-AsRef<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+AsRef<[u8]> for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         let ptr = if self.is_inlined() {
@@ -500,8 +344,8 @@ AsRef<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Deref for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Deref for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     type Target = [u8];
 
     #[inline]
@@ -510,24 +354,24 @@ Deref for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Borrow<[u8]> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Borrow<[u8]> for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn borrow(&self) -> &[u8] {
         self.as_ref()
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Default for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Default for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+Into<Vec<u8>> for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     #[inline]
     fn into(self) -> Vec<u8> {
         if self.is_inlined() {
@@ -546,8 +390,8 @@ Into<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
-From<Vec<u8>> for BufferMutGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool>
+From<Vec<u8>> for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL> {
     fn from(mut value: Vec<u8>) -> Self {
         let ptr = value.as_mut_ptr();
         let cap = value.capacity();

@@ -3,7 +3,7 @@ use std::fmt::Debug;
 pub mod half;
 pub mod extended;
 
-pub trait BufferLayout: Sized + Clone {
+pub trait BufferFormat<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool = true>: Sized + Clone {
 
     type FlagsTy: Flags;
 
