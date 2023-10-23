@@ -12,107 +12,10 @@ pub(crate) struct BaseBuffer {
     pub(crate) buffer: BufferUnion,
 }
 
-impl BaseBuffer {
-
-    #[inline]
-    pub fn new_reference(len: usize, cap: usize, wrx: usize, rdx: usize, offset: usize, ptr: *mut u8, flags: usize) -> Self {
-        let (cap, cap_offset) = translate_cap(cap);
-        let len = len | flags | (cap_offset << CAP_OFFSET_SHIFT);
-        Self {
-            len,
-            buffer: BufferUnion { reference: ReferenceBuffer::new(cap, offset, wrx, ptr), },
-        }
-    }
-
-    #[inline]
-    pub fn new_inlined(len: usize, offset: usize, value: [usize; 3]) -> Self {
-        Self {
-            len: len | (offset << INLINE_OFFSET_SHIFT),
-            buffer: BufferUnion { inlined: [0; 3], },
-        }
-    }
-
-    #[inline]
-    pub fn len_reference(&self) -> usize {
-        self.len & WORD_MASK
-    }
-
-    #[inline]
-    pub fn len_inlined(&self) -> usize {
-        self.len & INLINE_LEN_MASK
-    }
-
-    #[inline]
-    pub fn set_len_reference(&mut self, len: usize) {
-        self.len = (self.len & TAIL_MASK) | len;
-    }
-
-    #[inline]
-    pub fn set_len_inlined(&mut self, len: usize) {
-        self.len = (self.len & !INLINE_LEN_MASK) | len;
-    }
-
-    #[inline]
-    pub fn offset_reference(&self) -> usize {
-        self.buffer.reference.offset & WORD_MASK
-    }
-
-    #[inline]
-    pub fn offset_inlined(&self) -> usize {
-        (self.len & INLINE_OFFSET_MASK) >> INLINE_OFFSET_SHIFT
-    }
-
-    #[inline]
-    pub fn set_offset_reference(&mut self, offset: usize) {
-        self.buffer.reference.offset = (self.buffer.reference.offset & TAIL_MASK) | offset;
-    }
-
-    #[inline]
-    pub fn set_offset_inlined(&mut self, offset: usize) {
-        self.len = (self.len & !INLINE_OFFSET_MASK) | (offset << INLINE_OFFSET_SHIFT);
-    }
-
-    #[inline]
-    pub fn wrx_reference(&self) -> usize {
-        self.buffer.reference.wrx & WORD_MASK
-    }
-
-    #[inline]
-    pub fn wrx_inlined(&self) -> usize {
-        (self.len & INLINE_WRX_MASK) >> INLINE_WRX_SHIFT
-    }
-
-    #[inline]
-    pub fn set_wrx_reference(&mut self, wrx: usize) {
-        self.buffer.reference.wrx = (self.buffer.reference.wrx & TAIL_MASK) | wrx;
-    }
-
-    #[inline]
-    pub fn set_wrx_inlined(&mut self, wrx: usize) {
-        self.len = (self.len & !INLINE_WRX_MASK) | (wrx << INLINE_WRX_SHIFT);
-    }
-
-    #[inline]
-    pub fn rdx_reference(&self) -> usize {
-        ((self.buffer.reference.wrx & RDX_LOWER_MASK) >> RDX_LOWER_SHIFT) | ((self.len & RDX_UPPER_MASK) >> (RDX_UPPER_SHIFT - RDX_LOWER_SHIFT))
-    }
-
-    #[inline]
-    pub fn rdx_inlined(&self) -> usize {
-        (self.len & INLINE_RDX_MASK) >> INLINE_RDX_SHIFT
-    }
-
-    #[inline]
-    pub fn set_rdx_reference(&mut self, rdx: usize) {
-        self.buffer.reference.wrx = (self.buffer.reference.wrx & WORD_MASK) | (rdx << RDX_LOWER_SHIFT);
-        self.len = (self.len & !RDX_UPPER_MASK) | ((rdx << (RDX_UPPER_SHIFT - RDX_LOWER_SHIFT)) & RDX_UPPER_MASK);
-    }
-
-}
-
-union BufferUnion {
-    inlined: [usize; 3],
-    reference: ReferenceBuffer,
+#[derive(Copy, Clone)]
+pub(crate) union BufferUnion {
+    pub(crate) inlined: [usize; 3],
+    pub(crate) reference: ReferenceBuffer,
 }
 
 const CAP_OFFSET_MASK: usize = build_bit_mask(COMPRESSED_WORD_SIZE, CAP_OFFSET_BITS);
@@ -155,7 +58,7 @@ pub(crate) struct ReferenceBuffer {
 impl ReferenceBuffer {
 
     #[inline]
-    fn new(cap: usize, offset: usize, wrx: usize, ptr: *mut u8) -> Self {
+    pub fn new(cap: usize, offset: usize, wrx: usize, ptr: *mut u8) -> Self {
         Self {
             wrx,
             offset: offset | (cap << CAP_SHIFT),
