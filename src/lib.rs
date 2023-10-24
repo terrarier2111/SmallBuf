@@ -63,6 +63,8 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
     /// leaving the current buffer empty.
     fn split(&mut self) -> Self;
 
+    /// this will merge the current view and another view that was previously split off
+    /// from it.
     fn unsplit(&mut self, other: Self);
 
     fn get_slice(&mut self, bytes: usize) -> &[u8];
