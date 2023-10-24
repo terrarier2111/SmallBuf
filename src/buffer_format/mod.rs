@@ -51,6 +51,12 @@ pub trait BufferFormat<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool = 
 
     fn set_cap_inlined(&mut self, cap: usize);
 
+    fn ptr_reference(&self) -> *mut u8;
+
+    fn ptr_inlined(&self) -> *mut u8;
+
+    fn set_ptr_reference(&mut self, ptr: *mut u8);
+
     fn flags(&self) -> Self::FlagsTy;
 
 }

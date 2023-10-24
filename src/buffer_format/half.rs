@@ -200,6 +200,21 @@ impl<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool> BufferFormat<INLINE
     }
 
     #[inline]
+    fn ptr_reference(&self) -> *mut u8 {
+        self.0.buffer.reference.ptr
+    }
+
+    #[inline]
+    fn ptr_inlined(&self) -> *mut u8 {
+        (&self.0.buffer.inlined as *const [usize; 3]).cast::<u8>().cast_mut()
+    }
+
+    #[inline]
+    fn set_ptr_reference(&mut self, ptr: *mut u8) {
+        self.0.buffer.reference.ptr = ptr;
+    }
+
+    #[inline]
     fn flags(&self) -> Self::FlagsTy {
         BufferTy(self.0.len & BUFFER_TY_MASK)
     }

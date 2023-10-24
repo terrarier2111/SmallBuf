@@ -1,6 +1,6 @@
 use crate::{buffer_layout::{BaseBuffer, INLINE_SIZE_BITS, BufferUnion, ReferenceBuffer}, util::{build_bit_mask, round_up_pow_2, greater_zero_ret_one}};
 
-use super::{BufferLayout, Flags};
+use super::{Flags, BufferFormat};
 
 const INLINE_LEN_MASK: usize = build_bit_mask(0, INLINE_SIZE_BITS);
 const INLINE_OFFSET_MASK: usize = build_bit_mask(INLINE_OFFSET_SHIFT, INLINE_SIZE_BITS);
@@ -74,7 +74,7 @@ pub(crate) const fn translate_cap(capacity: usize) -> (usize, usize) {
 #[derive(Clone)]
 pub struct FormatExtended(BaseBuffer);
 
-impl<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool> BufferLayout<INLINE_SUPPORT, STATIC_SUPPORT> for FormatExtended {
+impl<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool> BufferFormat<INLINE_SUPPORT, STATIC_SUPPORT> for FormatExtended {
     type FlagsTy = BufferTy;
 
     #[inline]
@@ -196,6 +196,21 @@ impl<const INLINE_SUPPORT: bool, const STATIC_SUPPORT: bool> BufferLayout<INLINE
 
     fn set_cap_inlined(&mut self, cap: usize) {
         todo!()
+    }
+
+    #[inline]
+    fn ptr_reference(&self) -> *mut u8 {
+        self.0.buffer.reference.ptr
+    }
+
+    #[inline]
+    fn ptr_inlined(&self) -> *mut u8 {
+        (&self.0.buffer.inlined as *const [usize; 3]).cast::<u8>().cast_mut()
+    }
+
+    #[inline]
+    fn set_ptr_reference(&mut self, ptr: *mut u8) {
+        self.0.buffer.reference.ptr = ptr;
     }
 
     #[inline]
