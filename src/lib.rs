@@ -67,6 +67,8 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
     /// from it.
     fn unsplit(&mut self, other: Self);
 
+    fn try_unsplit(&mut self, other: Self) -> Result<(), Self>;
+
     fn get_slice(&mut self, bytes: usize) -> &[u8];
 
     #[inline]

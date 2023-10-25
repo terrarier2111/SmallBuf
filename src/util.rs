@@ -78,10 +78,10 @@ pub(crate) unsafe fn align_unaligned_ptr_to<const ALIGNMENT: usize, const REGION
 }
 
 #[inline]
-pub(crate) unsafe fn realloc_buffer_counted(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
+pub(crate) unsafe fn realloc_buffer_counted(buf: *mut u8, offset: usize, len: usize, new_cap: usize) -> *mut u8 {
     let alloc = unsafe { alloc_uninit_buffer(new_cap) };
     // copy the previous buffer into the newly allocated one
-    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+    unsafe { ptr::copy_nonoverlapping(buf.add(offset), alloc, len); }
 
     // setup metadata
 
@@ -98,16 +98,16 @@ const ADDITIONAL_SIZE: usize = METADATA_SIZE + align_of::<usize>() - 1;
 const METADATA_SIZE: usize = size_of::<usize>() * 2;
 
 #[inline]
-pub(crate) unsafe fn realloc_buffer(buf: *mut u8, len: usize, new_cap: usize) -> *mut u8 {
+pub(crate) unsafe fn realloc_buffer(buf: *mut u8, offset: usize, len: usize, new_cap: usize) -> *mut u8 {
     let alloc = unsafe { alloc_uninit_buffer(new_cap) };
     // copy the previous buffer into the newly allocated one
-    unsafe { ptr::copy_nonoverlapping(buf, alloc, len); }
+    unsafe { ptr::copy_nonoverlapping(buf.add(offset), alloc, len); }
     alloc
 }
 
 #[inline]
-pub(crate) unsafe fn realloc_buffer_and_dealloc(buf: *mut u8, len: usize, old_cap: usize, new_cap: usize) -> *mut u8 {
-    let alloc = unsafe { realloc_buffer(buf, len, new_cap) };
+pub(crate) unsafe fn realloc_buffer_and_dealloc(buf: *mut u8, offset: usize, len: usize, old_cap: usize, new_cap: usize) -> *mut u8 {
+    let alloc = unsafe { realloc_buffer(buf, offset, len, new_cap) };
     unsafe { dealloc(buf, old_cap); }
     alloc
 }
