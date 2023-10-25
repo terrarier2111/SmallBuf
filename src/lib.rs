@@ -28,6 +28,35 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
 
     fn truncate(&mut self, len: usize);
 
+    /// this will split off everything past offset bytes from the current
+    /// reader index and return a buffer to the split-off buffer.
+    ///
+    /// offset represents an offset from the current reader index
+    fn split_off(&mut self, offset: usize) -> Self;
+
+    /// splits off everything before the current reader index offset by
+    /// the offset parameter, returning the split-off buffer.
+    ///
+    /// offset represents an offset from the current reader index
+    fn split_to(&mut self, offset: usize) -> Self;
+
+    /// this will split the current view at the current reader index,
+    /// leaving the current buffer empty.
+    fn split(&mut self) -> Self;
+
+    /// this will merge the current view and another view that was previously split off
+    /// from it. Note that this will only work on buffers that weren't modified in a way
+    /// that caused reallocation after splitting.
+    /// 
+    /// #panic
+    /// panics on failure to merge buffers as described above.
+    fn unsplit(&mut self, other: Self);
+
+    /// this will merge the current view and another view that was previously split off
+    /// from it. Note that this will only work on buffers that weren't modified in a way
+    /// that caused reallocation after splitting.
+    fn try_unsplit(&mut self, other: Self) -> Result<(), Self>;
+
 }
 
 pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
@@ -46,28 +75,6 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
     /// this will return the amount of remaining bytes that can be
     /// read from this buffer
     fn remaining(&self) -> usize;
-
-    /// this will split off everything past offset bytes from the current
-    /// reader index and return a buffer to the split-off buffer.
-    ///
-    /// offset represents an offset from the current reader index
-    fn split_off(&mut self, offset: usize) -> Self;
-
-    /// splits off everything before the current reader index offset by
-    /// the offset parameter, returning the split-off buffer.
-    ///
-    /// offset represents an offset from the current reader index
-    fn split_to(&mut self, offset: usize) -> Self;
-
-    /// this will split the current view at the current reader index,
-    /// leaving the current buffer empty.
-    fn split(&mut self) -> Self;
-
-    /// this will merge the current view and another view that was previously split off
-    /// from it.
-    fn unsplit(&mut self, other: Self);
-
-    fn try_unsplit(&mut self, other: Self) -> Result<(), Self>;
 
     fn get_slice(&mut self, bytes: usize) -> &[u8];
 

@@ -94,6 +94,27 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
             }
         }
     }
+
+    fn split_off(&mut self, offset: usize) -> Self {
+        
+    }
+
+    fn split_to(&mut self, offset: usize) -> Self {
+        
+    }
+
+    fn split(&mut self) -> Self {
+        
+    }
+
+    fn unsplit(&mut self, other: Self) {
+        
+    }
+
+    fn try_unsplit(&mut self, other: Self) -> Result<(), Self> {
+        
+    }
+
 }
 
 impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const RETAIN_INDICES: bool>
