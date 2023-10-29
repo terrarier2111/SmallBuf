@@ -29,19 +29,26 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
     fn truncate(&mut self, len: usize);
 
     /// this will split off everything past offset bytes from the current
-    /// reader index and return a buffer to the split-off buffer.
+    /// [type-dependent] index, returning the split-off buffer.
+    /// 
+    /// [type-dependent]: This is reader for `buffer.rs` and `buffer_rw.rs` and writer for `buffer_mut.rs`
     ///
     /// offset represents an offset from the current reader index
     fn split_off(&mut self, offset: usize) -> Self;
 
-    /// splits off everything before the current reader index offset by
+    /// splits off everything before the current [type-dependent] index offset by
     /// the offset parameter, returning the split-off buffer.
+    /// 
+    /// [type-dependent]: This is reader for `buffer.rs` and `buffer_rw.rs` and writer for `buffer_mut.rs`
     ///
-    /// offset represents an offset from the current reader index
+    /// offset represents an offset from the current reader/writer index
     fn split_to(&mut self, offset: usize) -> Self;
 
-    /// this will split the current view at the current reader index,
-    /// leaving the current buffer empty.
+    /// this will split the current view at the current [type-dependent] index,
+    /// leaving the current buffer' remaining empty.
+    /// 
+    /// [type-dependent]: This is reader for `buffer.rs` and `buffer_rw.rs` and writer for `buffer_mut.rs`
+    /// 
     fn split(&mut self) -> Self;
 
     /// this will merge the current view and another view that was previously split off

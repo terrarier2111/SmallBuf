@@ -104,7 +104,16 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     fn split(&mut self) -> Self {
-        
+        if self.is_inlined() {
+            let other = Self(LAYOUT::new_inlined(self.0.len_inlined() - self.0.wrx_inlined(), self.0.offset_inlined() + self.0.wrx_inlined(), unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }));
+            self.0.set_len_inlined(self.0.wrx_inlined());
+            other
+        } else {
+            unsafe { self.increment_ref_cnt(); }
+            let other = Self(LAYOUT::new_reference(self.0.len_reference() - self.0.wrx_reference(), self.0.cap_reference(), 0, 0, self.0.offset_inlined() + self.0.wrx_inlined(), unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }, self.0.flags()));
+            self.0.set_len_reference(self.0.wrx_reference());
+            other
+        }
     }
 
     fn unsplit(&mut self, other: Self) {
@@ -188,6 +197,16 @@ BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICE
     #[inline]
     pub(crate) unsafe fn meta_ptr(&self) -> *mut u8 {
         unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.0.ptr_reference(), self.0.cap_reference()) }
+    }
+
+    #[inline]
+    unsafe fn increment_ref_cnt(&self) {
+        unsafe { &*self.meta_ptr().cast::<AtomicUsize>() }.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[inline]
+    unsafe fn decrement_ref_cnt(&self) {
+        unsafe { &*self.meta_ptr().cast::<AtomicUsize>() }.fetch_sub(1, Ordering::AcqRel);
     }
 
 }
