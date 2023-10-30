@@ -96,24 +96,32 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     fn split_off(&mut self, offset: usize) -> Self {
-        
-    }
-
-    fn split_to(&mut self, offset: usize) -> Self {
-        
-    }
-
-    fn split(&mut self) -> Self {
         if self.is_inlined() {
-            let other = Self(LAYOUT::new_inlined(self.0.len_inlined() - self.0.wrx_inlined(), self.0.offset_inlined() + self.0.wrx_inlined(), unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }));
-            self.0.set_len_inlined(self.0.wrx_inlined());
+            let other = Self(LAYOUT::new_inlined(self.0.len_inlined() - self.0.wrx_inlined() - offset, self.0.offset_inlined() + self.0.wrx_inlined() + offset, unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }));
+            self.0.set_len_inlined(self.0.wrx_inlined() + offset);
             other
         } else {
             unsafe { self.increment_ref_cnt(); }
-            let other = Self(LAYOUT::new_reference(self.0.len_reference() - self.0.wrx_reference(), self.0.cap_reference(), 0, 0, self.0.offset_inlined() + self.0.wrx_inlined(), unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }, self.0.flags()));
-            self.0.set_len_reference(self.0.wrx_reference());
+            let other = Self(LAYOUT::new_reference(self.0.len_reference() - self.0.wrx_reference() - offset, self.0.cap_reference(), 0, 0, self.0.offset_inlined() + self.0.wrx_inlined() + offset, unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }, self.0.flags()));
+            self.0.set_len_reference(self.0.wrx_reference() + offset);
             other
         }
+    }
+
+    fn split_to(&mut self, offset: usize) -> Self {
+        if self.is_inlined() {
+            let other = Self(LAYOUT::new_inlined(self.0.wrx_inlined() + offset, self.0.offset_inlined(), unsafe { *self.0.ptr_inlined().cast::<[usize; 3]>() }));
+            other.0.set_wrx_inlined(self.0.wrx_inlined());
+            other.0.set_rdx_inlined(self.0.rdx_inlined());
+            self.0.set_len_inlined(self.0.wrx_inlined() + offset);
+            self.0.set_rdx_inlined(0);
+            self.0.set_offset_inlined(self.0.offset_inlined() + self.0.wrx_inlined() + offset);
+            self.0.set_wrx_inlined(0);
+        }
+    }
+
+    fn split(&mut self) -> Self {
+        self.split_off(0)
     }
 
     fn unsplit(&mut self, other: Self) {
@@ -121,7 +129,21 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     fn try_unsplit(&mut self, other: Self) -> Result<(), Self> {
-        
+        if self.0.flags() != other.0.flags() {
+            return Err(other);
+        }
+        let own_off = self.0.offset();
+        let other_off = other.0.offset();
+        let (min, max) = if own_off < other_off {
+            (&self, &other)
+        } else {
+            (&other, &self)
+        };
+        let dist = max.0.offset() - min.0.offset();
+        // check if buffers are adjacent
+        if dist != min.len() {
+            return Err(other);
+        }
     }
 
 }
