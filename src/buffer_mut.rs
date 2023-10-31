@@ -125,7 +125,7 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     fn unsplit(&mut self, other: Self) {
-        
+        self.try_unsplit(other).unwrap();
     }
 
     fn try_unsplit(&mut self, other: Self) -> Result<(), Self> {
@@ -139,11 +139,28 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
         } else {
             (&other, &self)
         };
+
+        // check if the left buffer still has uninit data
+        if min.0.wrx() != min.0.len() {
+            return Err(other);
+        }
+
         let dist = max.0.offset() - min.0.offset();
         // check if buffers are adjacent
         if dist != min.len() {
             return Err(other);
         }
+
+        // check if ptrs aren't matching
+        if !self.0.flags().is_inlined() && min.0.ptr_reference() != max.0.ptr_reference() {
+            return Err(other);
+        }
+
+        self.0.set_len_inlined(self.0.len() + other.0.len());
+        self.0.set_offset(self.0.offset().min(other.0.offset()));
+        self.0.set_wrx(self.0.wrx() + other.0.wrx());
+        self.0.set_rdx(0);
+        Ok(())
     }
 
 }

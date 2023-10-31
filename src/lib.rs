@@ -53,7 +53,8 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
 
     /// this will merge the current view and another view that was previously split off
     /// from it. Note that this will only work on buffers that weren't modified in a way
-    /// that caused reallocation after splitting.
+    /// that caused reallocation after splitting. Note, that the inactive index
+    /// (opposite of the type-dependent index specified above) will be reset to the beginning of the comboned buffer.
     /// 
     /// #panic
     /// panics on failure to merge buffers as described above.
@@ -61,7 +62,8 @@ pub trait GenericBuffer: Clone + AsRef<[u8]> + Deref<Target = [u8]> + Borrow<[u8
 
     /// this will merge the current view and another view that was previously split off
     /// from it. Note that this will only work on buffers that weren't modified in a way
-    /// that caused reallocation after splitting.
+    /// that caused reallocation after splitting. Note, that the inactive index
+    /// (opposite of the type-dependent index specified above) will be reset to the beginning of the comboned buffer.
     fn try_unsplit(&mut self, other: Self) -> Result<(), Self>;
 
 }
