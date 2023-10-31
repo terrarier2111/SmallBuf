@@ -322,7 +322,7 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
 
 }
 
-impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const RETAIN_INDICES: bool, const RETAIN_INDICES: bool>
+impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const RETAIN_INDICES: bool>
 Drop for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICES> {
     #[inline]
     fn drop(&mut self) {
