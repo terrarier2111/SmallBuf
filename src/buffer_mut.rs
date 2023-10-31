@@ -117,6 +117,13 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
             self.0.set_rdx_inlined(0);
             self.0.set_offset_inlined(self.0.offset_inlined() + self.0.wrx_inlined() + offset);
             self.0.set_wrx_inlined(0);
+        } else {
+            unsafe { self.increment_ref_cnt(); }
+            let other = Self(LAYOUT::new_reference(self.0.wrx_reference() + offset, self.0.cap_reference(), self.0.wrx_reference(), self.0.rdx_reference(), self.0.offset_reference(), self.0.ptr_reference(), self.0.flags()));
+            self.0.set_len_reference(self.0.wrx_reference() + offset);
+            self.0.set_rdx_reference(0);
+            self.0.set_offset_reference(self.0.offset_reference() + self.0.wrx_reference() + offset);
+            self.0.set_wrx_reference(0);
         }
     }
 
