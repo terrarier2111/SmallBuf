@@ -19,9 +19,6 @@ pub struct BufferMutGeneric<LAYOUT: BufferFormat<INLINE_SMALL, false> = FormatHa
 
 // FIXME: only allow cap to be a multiple of meta_align in order to be able to use the lower bits to store the additional size that was masked off to align the metadata properly
 
-// FIXME: store base ptr and alloc_cap in the metadata in addition to the ref cnt
-
-
 // TODO: additional features: allow aligning the ref cnt ptr to the cache line size
 
 /// this is only
@@ -75,8 +72,10 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
         }
         let old_buf = self.0.ptr_reference();
         let alloc = unsafe { realloc_buffer_counted(old_buf, self.0.offset_reference(), self.0.wrx_reference(), target_cap) };
-        // FIXME: decrement ref cnt and only dealloc if 0
-        unsafe { dealloc(old_buf, self.0.cap_reference()); }
+        
+        if self.decrement_ref_cnt() == 0 {
+            unsafe { dealloc(old_buf, self.0.cap_reference()); }
+        }
         self.0.set_ptr_reference(alloc);
         self.0.set_cap_reference(target_cap);
         self.0.set_len_reference(self.0.wrx_reference());
@@ -190,7 +189,7 @@ BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICE
     fn ensure_large_enough(&mut self, req: usize) -> *mut u8 {
         let self_ptr = self as *mut BufferMutGeneric<LAYOUT, { GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { RETAIN_INDICES }>;
         if self.is_inlined() {
-            if self.len() + req > INLINE_SIZE { // FIXME: check for wrx + req instead of len + req
+            if self.0.len_inlined() < self.0.wrx_inlined() + req {
                 #[cold]
                 #[inline(never)]
                 fn outline_buffer<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const RETAIN_INDICES: bool>(buffer: *mut BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICES>, req: usize) -> *mut u8 {
@@ -224,8 +223,13 @@ BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICE
                 let old_cap = unsafe { (&*buffer).0.cap_reference() };
                 let len = unsafe { (&*buffer).0.len_reference() };
                 let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(round_up_pow_2(len).min(old_cap), len + req + ADDITIONAL_BUFFER_CAP);
-                // FIXME: reduce ref cnt and only dealloc if refcnt is 0
-                let alloc = unsafe { realloc_buffer_and_dealloc((&*buffer).0.ptr_reference(), (&*buffer).0.offset_reference(), len, old_cap, new_cap) };
+                
+                let alloc = unsafe { realloc_buffer((&*buffer).0.ptr_reference(), (&*buffer).0.offset_reference(), len, old_cap, new_cap) };
+
+                if unsafe { (&*buffer).decrement_ref_cnt() } == 0 {
+                    unsafe { dealloc((&*buffer).0.ptr_reference(), (&*buffer).0.cap_reference()); }
+                }
+
                 unsafe { (&mut *buffer).0.set_ptr_reference(alloc); }
                 unsafe { (&mut *buffer).0.set_cap_reference(new_cap); }
                 unsafe { (&mut *buffer).0.set_len_reference(new_cap); }
@@ -251,8 +255,8 @@ BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICE
     }
 
     #[inline]
-    unsafe fn decrement_ref_cnt(&self) {
-        unsafe { &*self.meta_ptr().cast::<AtomicUsize>() }.fetch_sub(1, Ordering::AcqRel);
+    unsafe fn decrement_ref_cnt(&self) -> usize {
+        unsafe { &*self.meta_ptr().cast::<AtomicUsize>() }.fetch_sub(1, Ordering::AcqRel) - 1
     }
 
 }
@@ -275,7 +279,7 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
 
     fn zeroed(len: usize) -> Self {
         if INLINE_SMALL && len <= INLINE_SIZE {
-            Self(LAYOUT::new_inlined(INLINE_SIZE, 0, [0; 3])) // FIXME: pass wrx (and maybe rdx) to inlined constructor
+            Self(LAYOUT::new_inlined(INLINE_SIZE, 0, [0; 3]))
         } else {
             let cap = len + ADDITIONAL_BUFFER_CAP;
             let alloc = alloc_zeroed_buffer(cap);
@@ -296,20 +300,20 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
     fn put_slice(&mut self, val: &[u8]) {
         let ptr = self.ensure_large_enough(val.len());
         unsafe { ptr::copy_nonoverlapping(val as *const [u8] as *const u8, ptr, val.len()); }
-        self.len += val.len();
+        self.0.set_len(self.0.len() + val.len());
     }
 
     fn put_bytes(&mut self, val: u8, repeat: usize) {
         let ptr = self.ensure_large_enough(repeat);
         unsafe { ptr::write_bytes(ptr, val, repeat); }
-        self.len += repeat;
+        self.0.set_len(self.0.len() + repeat);
     }
 
     #[inline]
     fn put_u8(&mut self, val: u8) {
         let ptr = self.ensure_large_enough(1);
         unsafe { *ptr = val; }
-        self.len += 1;
+        self.0.set_len(self.0.len() + 1);
     }
 
     fn reserve(&mut self, size: usize) {
@@ -317,7 +321,12 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
     }
 
     fn resize(&mut self, size: usize) {
-        
+        if self.0.len() <= size {
+            self.ensure_large_enough(size);
+        } else {
+            self.0.set_wrx(self.0.wrx().min(size));
+            self.0.set_rdx(self.0.rdx().min(size));
+        }
     }
 
 }
@@ -356,7 +365,6 @@ Clone for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RET
             return Self(self.0.clone());
         }
 
-        // FIXME: support offset in realloc!
         let alloc = unsafe { realloc_buffer_counted(self.0.ptr_reference(), self.0.offset_reference(), self.0.wrx_reference(), self.0.cap_reference()) };
         
         Self(LAYOUT::new_reference(self.0.len_reference(), self.0.cap_reference(), self.0.wrx_reference(), self.0.rdx_reference(), self.0.offset_reference(), alloc, self.0.flags()))
