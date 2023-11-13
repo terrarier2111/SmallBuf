@@ -188,7 +188,8 @@ pub trait WritableBuffer: GenericBuffer {
     fn zeroed(len: usize) -> Self;
 
     /// Resets the writer index to 0, so the buffer
-    /// can be written again from the start
+    /// can be written again from the start.
+    /// Note that this also resets the reader index.
     fn reset_writer_index(&mut self);
 
     fn reserve(&mut self, size: usize);

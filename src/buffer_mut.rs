@@ -288,6 +288,8 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
     #[inline]
     fn reset_writer_index(&mut self) {
         self.0.set_wrx(0);
+        // maintain rdx
+        self.0.set_rdx(0);
     }
 
     #[inline]
@@ -303,6 +305,7 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
         self.0.set_len(self.0.len() + val.len());
     }
 
+    #[inline]
     fn put_bytes(&mut self, val: u8, repeat: usize) {
         let ptr = self.ensure_large_enough(repeat);
         unsafe { ptr::write_bytes(ptr, val, repeat); }

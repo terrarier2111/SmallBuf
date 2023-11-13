@@ -18,16 +18,8 @@ pub type BufferRW = BufferRWGeneric;
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
-const LEN_MASK: usize = build_bit_mask(0, 5);
-const RDX_MASK: usize = build_bit_mask(5, 5);
-
 #[repr(C)]
 pub struct BufferRWGeneric<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE> = FormatHalf, const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true, const RETAIN_INDICES: bool = true>(pub(crate) LAYOUT);
-
-/// the MSB will never be used as allocations are capped at isize::MAX
-const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
-/// the MSB will never be used as allocations are capped at isize::MAX
-const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
 
 // FIXME: move both flags into `len` as we only need 3/4 of the available space in len.
 pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferRWGeneric<FormatHalf, 0, 0, false, false>>() - size_of::<usize>();
@@ -47,12 +39,12 @@ BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE
 
     #[inline]
     pub(crate) fn is_static(&self) -> bool {
-        STATIC_STORAGE && self.rdx & STATIC_BUFFER_FLAG != 0
+        STATIC_STORAGE && self.0.flags().is_static_reference()
     }
 
     #[inline]
     pub(crate) fn is_inlined(&self) -> bool {
-        INLINE_SMALL && self.len & INLINE_BUFFER_FLAG != 0
+        INLINE_SMALL && self.0.flags().is_reference()
     }
 
     /// SAFETY: this is only safe to call if the buffer isn't inlined and isn't static.
@@ -138,7 +130,7 @@ BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE
     /// inlined and isn't a static buffer
     #[inline]
     unsafe fn meta_ptr(&self) -> *mut u8 {
-        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.ptr, self.cap) }
+        unsafe { align_unaligned_ptr_to::<{ align_of::<usize>() }, METADATA_SIZE>(self.0.ptr_reference(), self.0.cap_reference()) }
     }
 
     /// SAFETY: this may only be called if the buffer is inlined.
@@ -222,20 +214,24 @@ GenericBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMA
             // we have nothing to do as the buffer is static
             return;
         }
+        let target_cap = self.0.wrx_reference() + ADDITIONAL_BUFFER_CAP;
+        if self.0.len_reference() <= target_cap {
+            // we have nothing to do as our capacity is already as small as possible
+            return;
+        }
         if !unsafe { self.is_only() } {
             // for now we just nop if there are other references to the buffer
             return;
         }
-        let target_cap = self.len + ADDITIONAL_BUFFER_CAP;
-        if self.cap >= target_cap {
-            // we have nothing to do as our capacity is already as small as possible
-            return;
+        let old_buf = self.0.ptr_reference();
+        let alloc = unsafe { realloc_buffer_counted(old_buf, self.0.offset_reference(), self.0.wrx_reference(), target_cap) };
+        
+        if unsafe { self.decrement_ref_cnt() } == 0 {
+            unsafe { dealloc(old_buf, self.0.cap_reference()); }
         }
-        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, target_cap) };
-        let old_buf = self.ptr;
-        unsafe { dealloc(old_buf, self.cap); }
-        self.ptr = alloc;
-        self.cap = target_cap;
+        self.0.set_ptr_reference(alloc);
+        self.0.set_cap_reference(target_cap);
+        self.0.set_len_reference(self.0.wrx_reference());
     }
 
     #[inline]
@@ -277,66 +273,22 @@ WritableBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     fn reserve(&mut self, size: usize) {
-        if self.is_inlined() {
-            if size <= INLINE_SIZE {
-                return;
-            }
-            let new_size = {
-                let mut new_size = INITIAL_CAP * GROWTH_FACTOR;
-                // if cap * GROWTH_FACTOR is smaller than size, retry
-                while new_size < size {
-                    new_size *= GROWTH_FACTOR;
-                }
-                new_size
-            };
-            let alloc = unsafe { alloc_uninit_buffer(new_size) };
-            let inlined_ptr = unsafe { (self as *mut BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> as *mut u8).add(size_of::<usize>()) };
-            unsafe { ptr::copy_nonoverlapping(inlined_ptr, alloc, self.len()); }
-            self.ptr = alloc;
-            self.cap = new_size;
-            self.rdx = (self.len & RDX_MASK) >> RDX_MASK.leading_zeros();
-            self.len &= LEN_MASK;
-            return;
-        }
-        if self.is_static() {
-            let new_size = {
-                let mut new_size = INITIAL_CAP * GROWTH_FACTOR;
-                // if cap * GROWTH_FACTOR is smaller than size, retry
-                while new_size < size {
-                    new_size *= GROWTH_FACTOR;
-                }
-                new_size
-            };
-            // FIXME: alloc buffer and move static data in there
-            let alloc = unsafe { alloc_uninit_buffer(new_size) };
-            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, self.len()); }
-            self.ptr = alloc;
-            self.cap = new_size;
-            self.rdx &= !STATIC_BUFFER_FLAG;
-            return;
-        }
-        let cap = self.cap;
-        let len = self.len();
-        let remaining = cap - len;
-        if remaining < size {
-            let new_size = {
-                let mut new_size = cap * GROWTH_FACTOR;
-                // if cap * GROWTH_FACTOR is smaller than size, retry
-                while new_size < size {
-                    new_size *= GROWTH_FACTOR;
-                }
-                new_size
-            };
-            let alloc = unsafe { alloc_uninit_buffer(new_size) };
-            unsafe { ptr::copy_nonoverlapping(self.ptr, alloc, len); }
-            unsafe { dealloc(self.ptr, cap); }
-            self.ptr = alloc;
-            self.cap = size;
-        }
+        self.ensure_large_enough(size);
     }
 
     fn resize(&mut self, size: usize) {
-        
+        if self.0.len() <= size {
+            self.ensure_large_enough(size);
+        } else {
+            self.0.set_wrx(self.0.wrx().min(size));
+            self.0.set_rdx(self.0.rdx().min(size));
+        }
+    }
+
+    fn reset_writer_index(&mut self) {
+        self.0.set_wrx(0);
+        // maintain rdx
+        self.0.set_rdx(0);
     }
 
     #[inline]
@@ -349,17 +301,24 @@ WritableBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     }
 
     #[inline]
-    fn put_bytes(&mut self, val: &[u8]) {
+    fn put_slice(&mut self, val: &[u8]) {
         let ptr = self.ensure_large_enough(val.len());
         unsafe { ptr::copy_nonoverlapping(val as *const [u8] as *const u8, ptr, val.len()); }
-        self.len += val.len();
+        self.0.set_len(self.0.len() + val.len());
+    }
+
+    #[inline]
+    fn put_bytes(&mut self, val: u8, repeat: usize) {
+        let ptr = self.ensure_large_enough(repeat);
+        unsafe { ptr::write_bytes(ptr, val, repeat); }
+        self.0.set_len(self.0.len() + repeat);
     }
 
     #[inline]
     fn put_u8(&mut self, val: u8) {
         let ptr = self.ensure_large_enough(1);
         unsafe { *ptr = val; }
-        self.len += 1;
+        self.0.set_len(self.0.len() + 1);
     }
 
 }
@@ -503,25 +462,15 @@ Clone for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     #[inline]
     fn clone(&self) -> Self {
         if self.is_inlined() || self.is_static() {
-            return Self {
-                len: self.len,
-                rdx: self.rdx,
-                ptr: self.ptr,
-                cap: self.cap,
-            };
+            return Self(self.0.clone());
         }
 
         // we can't just increment reference count as that would allow for
         // multiple mutable references to the same memory location
 
-        let alloc = unsafe { realloc_buffer_counted(self.ptr, self.len, self.cap) };
+        let alloc = unsafe { realloc_buffer_counted(self.0.ptr_reference(), self.0.offset_reference(), self.0.len_reference(), self.0.cap_reference()) };
 
-        Self {
-            len: self.len,
-            rdx: self.rdx,
-            ptr: alloc,
-            cap: self.cap,
-        }
+        Self(LAYOUT::new_reference(self.0.len_reference(), self.0.cap_reference(), self.0.wrx_reference(), self.0.rdx_reference(), self.0.offset_reference(), self.0.ptr_reference(), self.0.flags()))
     }
 }
 
