@@ -1,11 +1,13 @@
 use std::borrow::Borrow;
 use std::mem::{align_of, size_of};
-use std::ops::{Deref, RangeBounds};
+use std::ops::Deref;
 use std::{mem, ptr};
 use std::cmp::Ord;
 use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::util::{align_unaligned_len_to, align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
+use crate::buffer_format::{BufferFormat, Flags};
+use crate::buffer_format::half::FormatHalf;
+use crate::util::{align_unaligned_ptr_to, alloc_uninit_buffer, alloc_zeroed_buffer, build_bit_mask, dealloc, empty_sentinel, find_sufficient_cap, min, realloc_buffer, realloc_buffer_and_dealloc, realloc_buffer_counted};
 use crate::{buffer, buffer_mut, GenericBuffer, ReadableBuffer, RWBuffer, WritableBuffer};
 use crate::buffer::BufferGeneric;
 use crate::buffer_mut::BufferMutGeneric;
@@ -20,12 +22,7 @@ const LEN_MASK: usize = build_bit_mask(0, 5);
 const RDX_MASK: usize = build_bit_mask(5, 5);
 
 #[repr(C)]
-pub struct BufferRWGeneric<const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true> {
-    pub(crate) len: usize,
-    pub(crate) rdx: usize,
-    pub(crate) cap: usize,
-    pub(crate) ptr: *mut u8,
-}
+pub struct BufferRWGeneric<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE> = FormatHalf, const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const STATIC_STORAGE: bool = true, const RETAIN_INDICES: bool = true>(pub(crate) LAYOUT);
 
 /// the MSB will never be used as allocations are capped at isize::MAX
 const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
@@ -33,20 +30,20 @@ const INLINE_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
 const STATIC_BUFFER_FLAG: usize = 1 << (usize::BITS - 1);
 
 // FIXME: move both flags into `len` as we only need 3/4 of the available space in len.
-pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferRWGeneric<0, 0, false, false>>() - size_of::<usize>();
+pub(crate) const BASE_INLINE_SIZE: usize = size_of::<BufferRWGeneric<FormatHalf, 0, 0, false, false>>() - size_of::<usize>();
 const INLINE_SIZE: usize = min(min(BASE_INLINE_SIZE, buffer_mut::BASE_INLINE_SIZE), buffer::BASE_INLINE_SIZE);
 /// this additional storage is used to store the reference counter and
 /// to align said values properly.
 const ADDITIONAL_BUFFER_CAP: usize = METADATA_SIZE + align_of::<usize>() - 1;
 const METADATA_SIZE: usize = size_of::<usize>() * 1;
 
-unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Send for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {}
-unsafe impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Sync for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {}
+unsafe impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Send for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {}
+unsafe impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Sync for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {}
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
 
     #[inline]
     pub(crate) fn is_static(&self) -> bool {
@@ -67,12 +64,12 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
     #[inline]
     fn ensure_large_enough(&mut self, req: usize) -> *mut u8 {
-        let self_ptr = self as *mut BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
+        let self_ptr = self as *mut BufferRWGeneric<LAYOUT, { GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { RETAIN_INDICES }>;
         if self.is_inlined() {
             if self.len() + req > INLINE_SIZE {
                 #[cold]
                 #[inline(never)]
-                fn outline_buffer<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>, req: usize) -> *mut u8 {
+                fn outline_buffer<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>(buffer: *mut BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES>, req: usize) -> *mut u8 {
                     let rdx = (unsafe { (&*buffer).len } & RDX_MASK) >> LEN_MASK.count_ones();
                     // remove the inline flag and rdx data
                     unsafe { (&mut *buffer).len &= !(INLINE_BUFFER_FLAG | RDX_MASK); }
@@ -104,7 +101,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
         if self.cap < self.len + req + ADDITIONAL_BUFFER_CAP {
             #[inline(never)]
             #[cold]
-            fn resize_alloc<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>(buffer: *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE>, req: usize) {
+            fn resize_alloc<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>(buffer: *mut BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES>, req: usize) {
                 let old_cap = unsafe { (&*buffer).cap };
                 let len = unsafe { (&*buffer).len };
                 let new_cap = find_sufficient_cap::<{ GROWTH_FACTOR }>(old_cap, len + req + ADDITIONAL_BUFFER_CAP);
@@ -147,7 +144,7 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
     /// SAFETY: this may only be called if the buffer is inlined.
     #[inline]
     unsafe fn inlined_buffer_ptr(&self) -> *mut u8 {
-        let ptr = self as *const BufferRWGeneric<{ GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }>;
+        let ptr = self as *const BufferRWGeneric<LAYOUT, { GROWTH_FACTOR }, { INITIAL_CAP }, { INLINE_SMALL }, { STATIC_STORAGE }, { RETAIN_INDICES }, { RETAIN_INDICES }>;
         unsafe { ptr.cast::<u8>().add(size_of::<usize>()) }.cast_mut()
     }
 
@@ -189,8 +186,8 @@ BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
 
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+GenericBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn new() -> Self {
         if !INLINE_SMALL && STATIC_STORAGE {
@@ -198,34 +195,22 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
             return Self::from(EMPTY);
         }
 
-        Self {
-            len: if INLINE_SMALL {
-                0 | INLINE_BUFFER_FLAG
-            } else {
-                0
-            },
-            rdx: 0,
-            ptr: if INLINE_SMALL {
-                null_mut()
-            } else {
-                empty_sentinel()
-            },
-            cap: 0,
+        if INLINE_SMALL {
+            Self(LAYOUT::new_inlined(INLINE_SIZE, 0, [0; 3]))
+        } else {
+            Self(LAYOUT::new_reference(0, 0, 0, 0, 0, empty_sentinel(), LAYOUT::FlagsTy::new_reference()))
         }
     }
 
     #[inline]
     fn len(&self) -> usize {
-        if self.is_inlined() {
-            return self.len & LEN_MASK;
-        }
-        self.len
+        self.0.wrx()
     }
 
     #[inline]
     fn clear(&mut self) {
-        self.len &= !INLINE_BUFFER_FLAG;
-        self.rdx = 0;
+        self.0.set_rdx(0);
+        self.0.set_wrx(0);
     }
 
     fn shrink(&mut self) {
@@ -256,34 +241,22 @@ GenericBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            self.set_len(len);
-            // fixup rdx after updating len in order to avoid the rdx getting OOB
-            self.set_rdx(self.get_rdx().min(len));
+            self.0.set_rdx(self.0.rdx().min(len));
+            self.0.set_wrx(self.0.wrx().min(len));
         }
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+WritableBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
 
     fn with_capacity(cap: usize) -> Self {
         if INLINE_SMALL && cap <= INLINE_SIZE {
-            Self {
-                len: 0 | INLINE_BUFFER_FLAG,
-                // the following two values are now treated as the buffer
-                rdx: 0,
-                ptr: null_mut(),
-                cap: 0,
-            }
+            Self(LAYOUT::new_inlined(INLINE_SIZE, 0, [0; 3]))
         } else {
             let cap = cap + ADDITIONAL_BUFFER_CAP;
             let alloc = unsafe { alloc_uninit_buffer(cap) };
-            let ret = Self {
-                len: 0,
-                rdx: 0,
-                ptr: alloc,
-                cap,
-            };
+            let ret = Self(LAYOUT::new_reference(0, cap, 0, 0, 0, alloc, LAYOUT::FlagsTy::new_reference()));
             // set ref cnt
             unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
             ret
@@ -292,22 +265,11 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
 
     fn zeroed(len: usize) -> Self {
         if INLINE_SMALL && len <= INLINE_SIZE {
-            Self {
-                len: len | INLINE_BUFFER_FLAG,
-                // the following two values are now treated as the buffer
-                rdx: 0,
-                ptr: null_mut(),
-                cap: 0,
-            }
+            Self(LAYOUT::new_inlined(INLINE_SIZE, 0, [0; 3]))
         } else {
-            let cap =  len + ADDITIONAL_BUFFER_CAP;
+            let cap = len + ADDITIONAL_BUFFER_CAP;
             let alloc = alloc_zeroed_buffer(cap);
-            let ret = Self {
-                len,
-                rdx: 0,
-                ptr: alloc,
-                cap,
-            };
+            let ret = Self(LAYOUT::new_reference(len, cap, 0, 0, 0, alloc, LAYOUT::FlagsTy::new_reference()));
             // set ref cnt
             unsafe { *ret.meta_ptr().cast::<usize>() = 1; }
             ret
@@ -328,7 +290,7 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
                 new_size
             };
             let alloc = unsafe { alloc_uninit_buffer(new_size) };
-            let inlined_ptr = unsafe { (self as *mut BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> as *mut u8).add(size_of::<usize>()) };
+            let inlined_ptr = unsafe { (self as *mut BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> as *mut u8).add(size_of::<usize>()) };
             unsafe { ptr::copy_nonoverlapping(inlined_ptr, alloc, self.len()); }
             self.ptr = alloc;
             self.cap = new_size;
@@ -402,8 +364,8 @@ WritableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
 
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-ReadableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+ReadableBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn remaining(&self) -> usize {
         let rdx = if STATIC_STORAGE {
@@ -503,11 +465,11 @@ ReadableBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STA
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-RWBuffer for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {}
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+RWBuffer for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {}
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Drop for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn drop(&mut self) {
         if self.is_inlined() {
@@ -536,8 +498,8 @@ Drop for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAG
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Clone for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Clone for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn clone(&self) -> Self {
         if self.is_inlined() || self.is_static() {
@@ -563,8 +525,8 @@ Clone for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORA
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-AsRef<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+AsRef<[u8]> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         let ptr = if self.is_inlined() {
@@ -577,8 +539,8 @@ AsRef<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Deref for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Deref for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     type Target = [u8];
 
     #[inline]
@@ -587,37 +549,32 @@ Deref for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORA
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Borrow<[u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Borrow<[u8]> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn borrow(&self) -> &[u8] {
         self.as_ref()
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Default for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Default for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-From<&'static [u8]> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+From<&'static [u8]> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn from(value: &'static [u8]) -> Self {
-        Self {
-            len: value.len(),
-            rdx: 0 | STATIC_BUFFER_FLAG,
-            ptr: value.as_ptr().cast_mut(),
-            cap: value.len(),
-        }
+        Self(LAYOUT::new_reference(value.len(), value.len(), value.len(), 0, 0, value.as_ptr().cast_mut(), Flags::new_static_reference()))
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Into<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Into<Vec<u8>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn into(self) -> Vec<u8> {
         if self.is_inlined() {
@@ -640,8 +597,8 @@ Into<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     }
 }
 
-impl<const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-From<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+From<Vec<u8>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
     fn from(mut value: Vec<u8>) -> Self {
         let ptr = value.as_mut_ptr();
@@ -673,10 +630,10 @@ From<Vec<u8>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STAT
     }
 }
 
-impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-From<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+From<BufferGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
-    fn from(value: BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE>) -> Self {
+    fn from(value: BufferGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE>) -> Self {
         if value.is_inlined() || value.is_static() {
             return Self {
                 len: value.len,
@@ -707,10 +664,10 @@ From<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_
     }
 }
 
-impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-Into<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const RETAIN_INDICES_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Into<BufferGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
-    fn into(self) -> BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL> {
+    fn into(self) -> BufferGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES_OTHER> {
         if self.is_inlined() || self.is_static() {
             return BufferGeneric {
                 len: self.len,
@@ -741,10 +698,10 @@ Into<BufferGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for Bu
     }
 }
 
-impl<const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool>
-From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for BufferRWGeneric<GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE> {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const RETAIN_INDICES_OTHER: bool, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+From<BufferMutGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
-    fn from(value: BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>) -> Self {
+    fn from(value: BufferMutGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL, RETAIN_INDICES_OTHER>) -> Self {
         let ret = Self {
             len: value.len,
             rdx: 0,
@@ -756,10 +713,10 @@ From<BufferMutGeneric<GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for
     }
 }
 
-impl
-Into<BufferMutGeneric> for BufferRWGeneric {
+impl<LAYOUT: BufferFormat<INLINE_SMALL, STATIC_STORAGE>, const GROWTH_FACTOR_OTHER: usize, const INITIAL_CAP_OTHER: usize, const GROWTH_FACTOR: usize, const INITIAL_CAP: usize, const INLINE_SMALL: bool, const STATIC_STORAGE: bool, const RETAIN_INDICES: bool>
+Into<BufferMutGeneric<LAYOUT, GROWTH_FACTOR_OTHER, INITIAL_CAP_OTHER, INLINE_SMALL>> for BufferRWGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, STATIC_STORAGE, RETAIN_INDICES> {
     #[inline]
-    fn into(self) -> BufferMutGeneric {
+    fn into(self) -> Self {
         let ret = BufferMutGeneric {
             len: self.len,
             ptr: self.ptr,

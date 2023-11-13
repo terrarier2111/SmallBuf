@@ -75,6 +75,10 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
         <Self as From<&'static [u8]>>::from(buf)
     }
 
+    /// Resets the reader index to 0 so the buffer can be read
+    /// from the beginning again.
+    fn reset_reader_index(&mut self);
+
     /// Advanced the reader index by `amount`
     /// 
     /// #Panic
@@ -175,11 +179,17 @@ pub trait ReadableBuffer: GenericBuffer + From<&'static [u8]> {
 
 pub trait WritableBuffer: GenericBuffer {
 
-    // FIXME: add reserve!
-
+    /// Allocates a buffer with at least `capacity` bytes of capacity
+    /// to store information.
     fn with_capacity(capacity: usize) -> Self;
 
+    /// Allocates a zero initialized buffer with at least `len` bytes capacity
+    /// to store information.
     fn zeroed(len: usize) -> Self;
+
+    /// Resets the writer index to 0, so the buffer
+    /// can be written again from the start
+    fn reset_writer_index(&mut self);
 
     fn reserve(&mut self, size: usize);
 
@@ -269,7 +279,7 @@ pub trait WritableBuffer: GenericBuffer {
 
 pub trait ReadonlyBuffer: ReadableBuffer {
 
-    /// the range represents a range offset to the current reader
+    /// the range represents a range offset from the current reader
     /// index.
     fn slice(&self, range_offset: impl RangeBounds<usize>) -> Self;
 
@@ -279,6 +289,7 @@ pub trait RWBuffer: ReadableBuffer + WritableBuffer {}
 
 mod tests {
     use std::mem::size_of;
+    use crate::buffer_format::BufferFormat;
     use crate::buffer_mut::BufferMut;
     use crate::{GenericBuffer, ReadableBuffer, WritableBuffer};
     use crate::buffer::Buffer;
@@ -361,8 +372,8 @@ mod tests {
         let original_len = buffer.len();
         let mut buffer = Buffer::from(buffer);
         let mut other = buffer.split_off(9);
-        println!("other: len {} rdx {}", other.len(), other.get_rdx());
-        println!("buffer: len {} rdx {}", buffer.len(), buffer.get_rdx());
+        println!("other: len {} rdx {}", other.len(), other.0.rdx());
+        println!("buffer: len {} rdx {}", buffer.len(), buffer.0.rdx());
         assert_eq!(other.remaining() + buffer.remaining(), original_len);
         other.unsplit(buffer);
         assert_eq!(other.remaining(), original_len);

@@ -15,7 +15,7 @@ pub type BufferMut = BufferMutGeneric;
 // INITIAL_CAP = GROWTH_FACTOR * INLINE_SIZE
 const INITIAL_CAP_DEFAULT: usize = (2 * INLINE_SIZE).next_power_of_two();
 
-pub struct BufferMutGeneric<LAYOUT: BufferFormat<INLINE_SMALL, false> = FormatHalf, const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const RETAIN_INDICES: bool = true>(LAYOUT);
+pub struct BufferMutGeneric<LAYOUT: BufferFormat<INLINE_SMALL, false> = FormatHalf, const GROWTH_FACTOR: usize = 2, const INITIAL_CAP: usize = INITIAL_CAP_DEFAULT, const INLINE_SMALL: bool = true, const RETAIN_INDICES: bool = true>(pub(crate) LAYOUT);
 
 // FIXME: only allow cap to be a multiple of meta_align in order to be able to use the lower bits to store the additional size that was masked off to align the metadata properly
 
@@ -73,7 +73,7 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
         let old_buf = self.0.ptr_reference();
         let alloc = unsafe { realloc_buffer_counted(old_buf, self.0.offset_reference(), self.0.wrx_reference(), target_cap) };
         
-        if self.decrement_ref_cnt() == 0 {
+        if unsafe { self.decrement_ref_cnt() } == 0 {
             unsafe { dealloc(old_buf, self.0.cap_reference()); }
         }
         self.0.set_ptr_reference(alloc);
@@ -84,13 +84,8 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
     #[inline]
     fn truncate(&mut self, len: usize) {
         if self.len() > len {
-            if self.is_inlined() {
-                self.0.set_rdx_inlined(self.0.rdx_inlined().min(len));
-                self.0.set_wrx_inlined(self.0.wrx_inlined().min(len));
-            } else {
-                self.0.set_rdx_reference(self.0.rdx_reference().min(len));
-                self.0.set_wrx_reference(self.0.wrx_reference().min(len));
-            }
+            self.0.set_rdx(self.0.rdx().min(len));
+            self.0.set_wrx(self.0.wrx().min(len));
         }
     }
 
@@ -153,7 +148,7 @@ GenericBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SM
 
         let dist = max.0.offset() - min.0.offset();
         // check if buffers are adjacent
-        if dist != min.len() {
+        if dist != min.0.wrx() {
             return Err(other);
         }
 
@@ -291,6 +286,11 @@ WritableBuffer for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_S
     }
 
     #[inline]
+    fn reset_writer_index(&mut self) {
+        self.0.set_wrx(0);
+    }
+
+    #[inline]
     fn capacity(&self) -> usize {
         // we treat the len as our cap as that's what is effectively usable for the buffer's user
         self.0.len()
@@ -409,18 +409,22 @@ impl<LAYOUT: BufferFormat<INLINE_SMALL, false>, const GROWTH_FACTOR: usize, cons
 Into<Vec<u8>> for BufferMutGeneric<LAYOUT, GROWTH_FACTOR, INITIAL_CAP, INLINE_SMALL, RETAIN_INDICES> {
     #[inline]
     fn into(self) -> Vec<u8> {
+         // FIXME: should we add ADDITIONAL_BUFFER_CAP on realloc?
+
+        // handle inlined buffers
         if self.is_inlined() {
-            let alloc = unsafe { realloc_buffer(self.0.ptr_inlined(), self.0.len(), self.0.len()) }; // FIXME: should we add ADDITIONAL_BUFFER_CAP?
+            let alloc = unsafe { realloc_buffer(self.0.ptr_inlined(), self.0.offset_inlined(), self.0.len_inlined(), self.0.len_inlined()) };
             return unsafe { Vec::from_raw_parts(alloc, self.0.len(), self.0.len()) };
         }
         let len = self.0.len_reference();
-        if unsafe { self.is_only() } {
+        // try reusing buffer
+        if unsafe { self.is_only() } && self.0.offset_reference() == 0 {
             let ret = unsafe { Vec::from_raw_parts(self.0.ptr_reference(), len, self.0.cap_reference()) };
             mem::forget(self);
             return ret;
         }
         // FIXME: should we try to shrink?
-        let buf = unsafe { realloc_buffer(self.0.ptr_reference(), len, self.0.cap_reference()) };
+        let buf = unsafe { realloc_buffer(self.0.ptr_reference(), self.0.offset_reference(), len, self.0.cap_reference()) };
         unsafe { Vec::from_raw_parts(buf, len, self.0.cap_reference()) }
     }
 }
